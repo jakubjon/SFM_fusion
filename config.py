@@ -51,7 +51,7 @@ PROCESSING_STEPS = {
     'recalculate_positions': False,   # Step 3: Recalculate camera positions of each individual painting batch with global calibration
     'point_cloud_generation': False,  # Step 4: Point cloud generation for each individual painting batch with global calibration
     'rectification': False,           # Step 5: Image low resolution rectification of all individual pictures of each individual painting batches with global calibration and creating overviews for each batch
-    'manual_roi_selection': True,    # Step 6: Allowing user to manually select ROI for each overview
+    'manual_roi_selection': False,    # Step 6: Allowing user to manually select ROI for each overview
     'high_res_rectification': True   # Step 7: Generate high resolution orthorectified images individual pictures for ROI
 }
 

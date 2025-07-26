@@ -139,7 +139,7 @@ class HighResRectificationStep(StepBase):
             
             # Step 5: Map ROI bounds from overview to 2D plane coordinates
             # The overview image was created with a specific grid size (config.GRID_SIZE // 2)
-            overview_grid_size = config.GRID_SIZE // 2
+            overview_grid_size = config.GRID_SIZE // 2  # This is 256
             
             # Extract ROI bounds from the overview image
             roi_x_min = roi_bounds['x_min']
@@ -147,22 +147,27 @@ class HighResRectificationStep(StepBase):
             roi_y_min = roi_bounds['y_min']
             roi_y_max = roi_bounds['y_max']
             
-            # Map ROI coordinates from overview grid to 2D plane coordinates
-            # This is the inverse of how the overview was created
-            roi_min_u = min_u + (roi_x_min / overview_grid_size) * (max_u - min_u)
-            roi_max_u = min_u + (roi_x_max / overview_grid_size) * (max_u - min_u)
-            roi_min_v = min_v + (roi_y_min / overview_grid_size) * (max_v - min_v)
-            roi_max_v = min_v + (roi_y_max / overview_grid_size) * (max_v - min_v)
+            # Map ROI coordinates from overview image pixels to 2D plane coordinates
+            # Calculate the step size in 2D plane coordinates per overview pixel
+            u_step = (max_u - min_u) / (overview_grid_size - 1)
+            v_step = (max_v - min_v) / (overview_grid_size - 1)
             
-            # Step 6: Create high resolution grid for ROI
-            grid_size = target_resolution
+            # Map ROI pixel coordinates to 2D plane coordinates
+            roi_min_u = min_u + roi_x_min * u_step
+            roi_max_u = min_u + roi_x_max * u_step
+            roi_min_v = min_v + roi_y_min * v_step
+            roi_max_v = min_v + roi_y_max * v_step
+            
+            # Step 6: Create high resolution grid for the FULL painting area (same as Step 5)
+            # Use a larger grid size for high resolution
+            full_grid_size = target_resolution * 2  # Create larger grid to ensure ROI is covered
             rectified_points_3d = []
             
-            for i in range(grid_size):
-                for j in range(grid_size):
-                    # Map grid coordinates to ROI coordinates
-                    u = roi_min_u + (i / (grid_size - 1)) * (roi_max_u - roi_min_u)
-                    v = roi_min_v + (j / (grid_size - 1)) * (roi_max_v - roi_min_v)
+            for i in range(full_grid_size):
+                for j in range(full_grid_size):
+                    # Map grid coordinates to full painting coordinates (same as Step 5)
+                    u = min_u + (i / (full_grid_size - 1)) * (max_u - min_u)
+                    v = min_v + (j / (full_grid_size - 1)) * (max_v - min_v)
                     
                     # Convert back to 3D
                     point_3d = plane_center + u * v1 + v * v2
@@ -170,7 +175,7 @@ class HighResRectificationStep(StepBase):
             
             rectified_points_3d = np.array(rectified_points_3d)
             
-            # Step 7: Project rectified points to image
+            # Step 7: Project rectified points to image (same as Step 5)
             src_points = []
             dst_points = []
             
@@ -184,7 +189,7 @@ class HighResRectificationStep(StepBase):
                     0 <= point_img[1] < img.shape[0]):
                     src_points.append(point_img)
                     # Map to rectified coordinates
-                    dst_points.append([i % grid_size, i // grid_size])
+                    dst_points.append([i % full_grid_size, i // full_grid_size])
             
             if len(src_points) < 4:
                 print(f"Not enough valid points for high-res rectification: {image_path.name}")
@@ -193,11 +198,39 @@ class HighResRectificationStep(StepBase):
             src_points = np.array(src_points, dtype=np.float32)
             dst_points = np.array(dst_points, dtype=np.float32)
             
-            # Step 8: Compute homography and apply rectification
+            # Step 8: Compute homography and apply rectification (same as Step 5)
             H = cv2.findHomography(src_points, dst_points)[0]
-            rectified = cv2.warpPerspective(img, H, (grid_size, grid_size))
+            full_rectified = cv2.warpPerspective(img, H, (full_grid_size, full_grid_size))
             
-            return rectified
+            # Step 9: Crop the full rectified image to ROI area
+            # Map ROI bounds to the full grid coordinates
+            roi_min_i = int((roi_min_u - min_u) / (max_u - min_u) * (full_grid_size - 1))
+            roi_max_i = int((roi_max_u - min_u) / (max_u - min_u) * (full_grid_size - 1))
+            roi_min_j = int((roi_min_v - min_v) / (max_v - min_v) * (full_grid_size - 1))
+            roi_max_j = int((roi_max_v - min_v) / (max_v - min_v) * (full_grid_size - 1))
+            
+            # Ensure bounds are within the full grid
+            roi_min_i = max(0, min(full_grid_size - 1, roi_min_i))
+            roi_max_i = max(0, min(full_grid_size - 1, roi_max_i))
+            roi_min_j = max(0, min(full_grid_size - 1, roi_min_j))
+            roi_max_j = max(0, min(full_grid_size - 1, roi_max_j))
+            
+            # Crop to ROI
+            roi_rectified = full_rectified[roi_min_j:roi_max_j+1, roi_min_i:roi_max_i+1]
+            
+            # Resize to target resolution if needed
+            if roi_rectified.shape[0] != target_resolution or roi_rectified.shape[1] != target_resolution:
+                roi_rectified = cv2.resize(roi_rectified, (target_resolution, target_resolution))
+            
+            # Debug: Print ROI mapping information
+            print(f"  ROI overview coords: ({roi_x_min}, {roi_y_min}) to ({roi_x_max}, {roi_y_max})")
+            print(f"  ROI plane coords: ({roi_min_u:.4f}, {roi_min_v:.4f}) to ({roi_max_u:.4f}, {roi_max_v:.4f})")
+            print(f"  ROI grid coords: ({roi_min_i}, {roi_min_j}) to ({roi_max_i}, {roi_max_j})")
+            print(f"  Full grid size: {full_grid_size}x{full_grid_size}")
+            print(f"  ROI crop size: {roi_rectified.shape[1]}x{roi_rectified.shape[0]}")
+            print(f"  Output resolution: {target_resolution}x{target_resolution}")
+            
+            return roi_rectified
             
         except Exception as e:
             print(f"[ERROR] Failed to load reconstruction for {painting_name}: {e}")
@@ -205,21 +238,49 @@ class HighResRectificationStep(StepBase):
     
     def apply_enhancement(self, image):
         """Apply image enhancement for high resolution output"""
-        # Convert to LAB color space
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        
-        # Apply CLAHE to L channel
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-        
-        # Convert back to BGR
-        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        
-        # Apply sharpening
-        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
-        enhanced = cv2.filter2D(enhanced, -1, kernel)
-        
-        return enhanced
+        # Check if image has alpha channel (BGRA)
+        if len(image.shape) == 3 and image.shape[2] == 4:
+            # Extract BGR channels for enhancement
+            bgr = image[:, :, :3]
+            alpha = image[:, :, 3]
+            
+            # Convert to LAB color space
+            lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+            
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            
+            # Convert back to BGR
+            enhanced_bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            
+            # Apply sharpening
+            kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+            enhanced_bgr = cv2.filter2D(enhanced_bgr, -1, kernel)
+            
+            # Reconstruct BGRA image
+            enhanced = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+            enhanced[:, :, :3] = enhanced_bgr
+            enhanced[:, :, 3] = alpha
+            
+            return enhanced
+        else:
+            # Handle regular BGR images
+            # Convert to LAB color space
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            
+            # Convert back to BGR
+            enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            
+            # Apply sharpening
+            kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+            enhanced = cv2.filter2D(enhanced, -1, kernel)
+            
+            return enhanced
     
     def run(self, **kwargs):
         """
@@ -357,11 +418,11 @@ class HighResRectificationStep(StepBase):
                 )
                 
                 if rectified is not None:
-                    # Apply enhancement
+                    # Apply enhancement (rectified already has alpha channel)
                     enhanced = self.apply_enhancement(rectified)
                     
-                    # Save high resolution rectified image
-                    output_path = self.high_res_dir / f"{painting_name}_{image_file.stem}_high_res.jpg"
+                    # Save high resolution rectified image with alpha channel as PNG
+                    output_path = self.high_res_dir / f"{painting_name}_{image_file.stem}_high_res.png"
                     cv2.imwrite(str(output_path), enhanced)
                     print(f"Saved high res rectified image: {output_path.name}")
                     
