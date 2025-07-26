@@ -4,6 +4,7 @@ This system reconstructs paintings from multiple photographs taken from differen
 
 ## Features
 
+- **Modular Pipeline**: Each processing step runs independently with clear inputs and outputs
 - **Multi-painting support**: Process multiple painting sets simultaneously
 - **Automatic camera calibration**: Estimates camera parameters from all image sets
 - **Structure-from-Motion**: Uses COLMAP for robust 3D reconstruction
@@ -11,6 +12,19 @@ This system reconstructs paintings from multiple photographs taken from differen
 - **Reflection removal**: Advanced filtering to reduce reflections and glare
 - **Super-resolution fusion**: Combines multiple images for higher quality results
 - **Orthophoto generation**: Creates true orthographic projections of paintings
+- **ROI-based processing**: Manual selection of regions of interest for high-resolution output
+
+## Pipeline Steps
+
+The system is organized into 7 modular steps:
+
+1. **Local SfM**: Run local SfM for initial camera positions and using initial camera calibration
+2. **Global Calibration**: Global camera calibration adjustment using selected distortion model radial by default
+3. **Recalculate Positions**: Recalculate camera positions of each individual painting batch with global calibration
+4. **Point Cloud Generation**: Point cloud generation for each individual painting batch with global calibration
+5. **Rectification**: Image low resolution rectification of all individual pictures of each individual painting batches with global calibration and creating overviews for each batch
+6. **Manual ROI Selection**: Allowing user to manually select ROI for each overview
+7. **High Resolution Rectification**: Generate high resolution orthorectified images individual pictures for ROI
 
 ## Directory Structure
 
@@ -24,9 +38,19 @@ SFM_fusion/
 │   ├── 2/          # Painting set 2
 │   ├── 3/          # Painting set 3
 │   └── 4/          # Painting set 4
-├── main.py          # Main reconstruction script
+├── main.py          # Main orchestration script
+├── step_base.py     # Base class for all processing steps
+├── step1_local_sfm.py              # Step 1: Local SfM
+├── step2_global_calibration.py     # Step 2: Global calibration
+├── step3_recalculate_positions.py  # Step 3: Position recalculation
+├── step4_point_cloud_generation.py # Step 4: Point cloud generation
+├── step5_rectification.py          # Step 5: Low resolution rectification
+├── step6_manual_roi_selection.py  # Step 6: Manual ROI selection
+├── step7_high_res_rectification.py # Step 7: High resolution rectification
+├── config.py        # Configuration file
 ├── requirements.txt # Python dependencies
-└── README.md       # This file
+├── workflow.md      # Detailed workflow documentation
+└── README.md        # This file
 ```
 
 ## Installation
@@ -43,44 +67,110 @@ pip install -r requirements.txt
 
 ## Usage
 
-1. **Prepare your photos**:
+### 1. Prepare your photos:
    - Create folders for each painting (1, 2, 3, 4, etc.)
    - Place photos of each painting in its respective folder
    - Use the same camera for all photos
    - Take photos from different angles (15-30° apart recommended)
 
-2. **Run the reconstruction**:
+### 2. Configure the pipeline:
+   Edit `config.py` to enable/disable specific steps:
+   ```python
+   PROCESSING_STEPS = {
+       'run_local_sfm': True,           # Step 1
+       'global_calibration': True,      # Step 2
+       'recalculate_positions': True,   # Step 3
+       'point_cloud_generation': True,  # Step 4
+       'rectification': True,           # Step 5
+       'manual_roi_selection': True,    # Step 6
+       'high_res_rectification': True   # Step 7
+   }
+   ```
+
+### 3. Run the reconstruction:
+
+**Complete pipeline:**
 ```bash
 python main.py
 ```
 
-3. **Check results**:
-   - `outputs/fused/`: Final high-quality orthophotos
-   - `outputs/rectified/`: Individual rectified images
-   - `outputs/calibration/`: Camera calibration data
+**Single step:**
+```bash
+python main.py --step run_local_sfm
+python main.py --step global_calibration
+python main.py --step recalculate_positions
+python main.py --step point_cloud_generation
+python main.py --step rectification
+python main.py --step manual_roi_selection
+python main.py --step high_res_rectification
+```
+
+**List available steps:**
+```bash
+python main.py --list-steps
+```
+
+**Check step dependencies:**
+```bash
+python main.py --check-deps rectification
+```
+
+### 4. Check results:
+   - `outputs/intermediate/`: Intermediate results from each step
+   - `outputs/rectified/`: Low resolution rectified images and overviews
+   - `outputs/high_res_rectified/`: High resolution rectified images
+   - `outputs/roi_selections/`: ROI visualization images
+   - `outputs/point_clouds/`: Point cloud visualizations (optional)
 
 ## Output Files
 
-### Fused Images
-- `{painting_name}_fused.jpg`: Final super-resolution orthophoto
-- Combines all images with reflection removal and sharpening
+### Intermediate Results
+- `step1_local_sfm_results.json`: Local reconstructions and calibrations
+- `step2_global_calibration_results.json`: Global camera parameters
+- `step3_recalculate_positions_results.json`: Global reconstructions
+- `step4_point_cloud_results.json`: Point cloud data
+- `step5_rectification_results.json`: Rectification data
+- `step6_roi_selection_results.json`: ROI selections
+- `step7_high_res_rectification_results.json`: High resolution data
 
 ### Rectified Images
-- `{painting_name}_rectified_{i}.jpg`: Individual perspective-corrected images
-- Each image is warped to the painting plane
+- `{painting_name}_overview.jpg`: Low resolution overview
+- `{painting_name}_rectified_{i}.jpg`: Low resolution rectified images
+- `{painting_name}_high_res_{i}.jpg`: High resolution rectified images
 
-### Calibration Data
-- `camera_calibration.json`: Camera parameters and reconstruction data
-- Contains camera matrix, plane parameters, and processing statistics
+### ROI Selections
+- `{painting_name}_roi_visualization.jpg`: ROI visualization with selected regions
+
+## Step Independence
+
+Each step can run independently:
+- **Input Loading**: Steps load required inputs from intermediate directory
+- **Output Storage**: Steps save results to intermediate directory  
+- **Dependency Checking**: Steps verify required inputs before execution
+- **Resume Capability**: Steps can resume from existing intermediate results
+
+## Testing Individual Steps
+
+Each step can be tested independently:
+```bash
+python step1_local_sfm.py
+python step2_global_calibration.py
+python step3_recalculate_positions.py
+python step4_point_cloud_generation.py
+python step5_rectification.py
+python step6_manual_roi_selection.py
+python step7_high_res_rectification.py
+```
 
 ## Algorithm Overview
 
-1. **Camera Calibration**: Estimates global camera parameters from all painting sets
-2. **Structure-from-Motion**: Reconstructs 3D camera positions and sparse point cloud
-3. **Plane Detection**: Finds the painting surface using RANSAC plane fitting
-4. **Image Rectification**: Warps images to remove perspective distortion
-5. **Reflection Removal**: Applies bilateral filtering to reduce glare
-6. **Super-resolution Fusion**: Aligns and combines multiple images for higher quality
+1. **Local SfM**: Reconstructs 3D camera positions and sparse point cloud for each painting
+2. **Global Calibration**: Estimates global camera parameters from all painting sets
+3. **Position Recalculation**: Recalculates camera positions using global calibration
+4. **Point Cloud Generation**: Generates point clouds and finds painting planes
+5. **Low Resolution Rectification**: Warps images to remove perspective distortion
+6. **ROI Selection**: Manual selection of regions of interest
+7. **High Resolution Rectification**: High-resolution orthorectified images for ROI
 
 ## Tips for Best Results
 
@@ -103,29 +193,25 @@ python main.py
 - Check that camera positions are well-distributed
 - Ensure sufficient 3D points are reconstructed
 
-### Reflections not removed
-- The algorithm uses bilateral filtering which may not remove all reflections
-- Consider using polarized lighting for better results
+### Steps fail due to missing inputs
+- Check that previous steps have completed successfully
+- Verify that intermediate results exist in `outputs/intermediate/`
+- Run steps in the correct order or use the complete pipeline
 
 ## Advanced Usage
 
 ### Custom Parameters
-Modify the `PaintingReconstructor` class to adjust:
+Modify the configuration in `config.py` to adjust:
 - Grid resolution for rectification
 - RANSAC parameters for plane fitting
 - Filtering parameters for reflection removal
 - Fusion algorithms for super-resolution
 
-### Batch Processing
-The system automatically processes all painting sets in the Photos directory. Each subfolder is treated as a separate painting.
-
-## Technical Details
-
-- **Camera Model**: Simple pinhole camera with radial distortion
-- **Plane Fitting**: RANSAC-based robust plane estimation
-- **Image Warping**: Bilinear interpolation for smooth results
-- **Fusion**: Optical flow alignment + weighted averaging
-- **Reflection Removal**: LAB color space bilateral filtering
+### Adding New Steps
+1. Create a new step module following the `StepBase` interface
+2. Implement the required methods: `run()`, `get_input_requirements()`, `get_output_files()`
+3. Add the step to the pipeline in `main.py`
+4. Update dependencies and configuration
 
 ## Dependencies
 

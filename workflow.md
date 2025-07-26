@@ -1,72 +1,153 @@
-## 1. Global Initialization
+# Painting Reconstruction Pipeline - Workflow Documentation
 
-1.1 Determine preliminary global camera intrinsics:
-  - Extract from EXIF of the first image if available  
-  - Otherwise, default to zeros or neutral initial values
+## Overview
 
----
+The painting reconstruction pipeline has been refactored into a modular system where each step can run independently, loading inputs and storing outputs. The main orchestration script (`main.py`) coordinates the execution based on the configuration in `config.py`.
 
-## 2. Registration of Painting X
+## Pipeline Steps
 
-2.1 Feature extraction from all images in Painting X  
-  - *(Skip if already exists)*
+### Step 1: Local SfM (`step1_local_sfm.py`)
+- **Purpose**: Run local SfM for initial camera positions and using initial camera calibration
+- **Inputs**: Photos directory with painting subdirectories
+- **Outputs**: Local reconstructions and camera calibrations for each painting
+- **Dependencies**: None
 
-2.2 Feature matching between all image pairs in Painting X  
-  - *(Skip if already exists)*
+### Step 2: Global Calibration (`step2_global_calibration.py`)
+- **Purpose**: Global camera calibration adjustment using selected distortion model radial by default
+- **Inputs**: Local camera calibrations from Step 1
+- **Outputs**: Global camera parameters
+- **Dependencies**: Step 1
 
-2.3 Estimate preliminary camera positions for a single bundle in Painting X  
-  - Compute reprojection error
+### Step 3: Recalculate Positions (`step3_recalculate_positions.py`)
+- **Purpose**: Recalculate camera positions of each individual painting batch with global calibration
+- **Inputs**: Local reconstructions from Step 1, global calibration from Step 2
+- **Outputs**: Global reconstructions with updated camera poses
+- **Dependencies**: Steps 1, 2
 
-2.4 Perform local bundle adjustment and estimate local camera intrinsics
+### Step 4: Point Cloud Generation (`step4_point_cloud_generation.py`)
+- **Purpose**: Point cloud generation for each individual painting batch with global calibration
+- **Inputs**: Global reconstructions from Step 3
+- **Outputs**: Point cloud data and plane information for each painting
+- **Dependencies**: Step 3
 
-2.5 Recalculate all camera positions using the refined local camera intrinsics
+### Step 5: Rectification (`step5_rectification.py`)
+- **Purpose**: Image low resolution rectification of all individual pictures of each individual painting batches with global calibration and creating overviews for each batch
+- **Inputs**: Global reconstructions from Step 3, point cloud data from Step 4
+- **Outputs**: Rectified images and overviews for each painting
+- **Dependencies**: Steps 3, 4
 
----
+### Step 6: Manual ROI Selection (`step6_manual_roi_selection.py`)
+- **Purpose**: Allowing user to manually select ROI for each overview
+- **Inputs**: Overview images from Step 5
+- **Outputs**: ROI selections for each painting
+- **Dependencies**: Step 5
 
-## 3. Registration of Painting Y
+### Step 7: High Resolution Rectification (`step7_high_res_rectification.py`)
+- **Purpose**: Generate high resolution orthorectified images individual pictures for ROI
+- **Inputs**: Global reconstructions from Step 3, point cloud data from Step 4, ROI selections from Step 6
+- **Outputs**: High resolution rectified images for each painting
+- **Dependencies**: Steps 3, 4, 6
 
-3.1 Repeat steps 2.1 through 2.5 for Painting Y
+## Usage
 
----
+### Run Complete Pipeline
+```bash
+python main.py
+```
 
-## 4. Cross-Bundle Calibration and Adjustment
+### Run Single Step
+```bash
+python main.py --step run_local_sfm
+python main.py --step global_calibration
+python main.py --step recalculate_positions
+python main.py --step point_cloud_generation
+python main.py --step rectification
+python main.py --step manual_roi_selection
+python main.py --step high_res_rectification
+```
 
-4.1 Compare local camera calibration results across all paintings
+### List Available Steps
+```bash
+python main.py --list-steps
+```
 
-4.2 Perform global bundle adjustment using all bundles  
-  - Minimize overall reprojection error  
-  - Output globally adjusted camera intrinsics
+### Check Step Dependencies
+```bash
+python main.py --check-deps rectification
+```
 
----
+## Configuration
 
-## 5. Final Camera Pose Recalculation
+Enable/disable steps in `config.py`:
 
-5.1 Recalculate all camera positions using the global camera intrinsics
+```python
+PROCESSING_STEPS = {
+    'run_local_sfm': True,           # Step 1
+    'global_calibration': True,      # Step 2
+    'recalculate_positions': True,   # Step 3
+    'point_cloud_generation': True,  # Step 4
+    'rectification': True,           # Step 5
+    'manual_roi_selection': True,    # Step 6
+    'high_res_rectification': True   # Step 7
+}
+```
 
----
+## Output Structure
 
-## 6. Processing of Painting X
+```
+outputs/
+├── intermediate/           # Intermediate results from each step
+│   ├── step1_local_sfm_results.json
+│   ├── step2_global_calibration_results.json
+│   ├── step3_recalculate_positions_results.json
+│   ├── step4_point_cloud_results.json
+│   ├── step5_rectification_results.json
+│   ├── step6_roi_selection_results.json
+│   └── step7_high_res_rectification_results.json
+├── rectified/             # Low resolution rectified images
+│   ├── painting1_overview.jpg
+│   ├── painting1_rectified_*.jpg
+│   └── ...
+├── high_res_rectified/    # High resolution rectified images
+│   ├── painting1_high_res_*.jpg
+│   └── ...
+├── roi_selections/        # ROI visualization images
+│   ├── painting1_roi_visualization.jpg
+│   └── ...
+└── point_clouds/         # Point cloud visualizations (optional)
+    ├── painting1_point_cloud.png
+    └── ...
+```
 
-6.1 Generate point cloud
+## Step Independence
 
-6.2 Determine painting plane
+Each step can be run independently:
 
-6.3 Create a reduced orthorectified painting overview  
-  - Simulate infinite focal length and perpendicular viewing rays  
-  - Save overview to disk
+1. **Input Loading**: Each step loads its required inputs from the intermediate directory
+2. **Output Storage**: Each step saves its results to the intermediate directory
+3. **Dependency Checking**: Steps check for required inputs before execution
+4. **Resume Capability**: Steps can resume from existing intermediate results
 
----
+## Error Handling
 
-<!-- 
-## 7. Further Processing (Skipped for Now)
+- Steps check for required inputs and fail gracefully if missing
+- Each step logs its progress and errors
+- Failed steps don't prevent subsequent steps from running (if dependencies are met)
+- Intermediate results are preserved for debugging
 
-7.1 Surface reconstruction
+## Testing Individual Steps
 
-7.2 Texture mapping
+Each step module can be tested independently:
 
-7.3 Reflection removal
+```bash
+python step1_local_sfm.py
+python step2_global_calibration.py
+# etc.
+```
 
-7.4 Super-resolution fusion
+## Customization
 
-7.5 Image stitching and color correction
--->
+- Modify step parameters in `config.py`
+- Add new steps by creating new step modules following the `StepBase` interface
+- Customize step dependencies in the main pipeline class
+- Adjust output formats and file naming conventions
