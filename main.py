@@ -8,8 +8,19 @@ import json
 from scipy import ndimage
 from sklearn.cluster import DBSCAN
 import warnings
+import time
+from datetime import datetime
 warnings.filterwarnings('ignore')
 import config
+
+def log_step(step_name, painting_name=None):
+    """Log a step with timestamp and painting name if applicable"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    if painting_name:
+        print(f"\n## {timestamp} - {step_name} - Painting: {painting_name}")
+    else:
+        print(f"\n## {timestamp} - {step_name}")
+    print("=" * 80)
 
 class PaintingReconstructor:
     def __init__(self, photos_dir=config.PHOTOS_DIR, output_dir=config.OUTPUT_DIR):
@@ -30,31 +41,102 @@ class PaintingReconstructor:
         # Global camera calibration (will be refined)
         self.global_camera_params = None
         
-    def run_colmap_sfm(self, image_dir, output_path, database_path):
-        """Run COLMAP SfM on a set of images"""
+        # Store local camera calibrations for comparison
+        self.local_camera_calibrations = {}
+        
+    def extract_exif_calibration(self, image_path):
+        """Extract preliminary camera calibration from EXIF data"""
+        try:
+            import exifread
+            with open(image_path, 'rb') as f:
+                tags = exifread.process_file(f)
+            
+            # Extract focal length and sensor info
+            focal_length = None
+            if 'EXIF FocalLength' in tags:
+                focal_length = float(tags['EXIF FocalLength'].values[0])
+            
+            # Get image dimensions
+            img = cv2.imread(str(image_path))
+            if img is not None:
+                height, width = img.shape[:2]
+                
+                # Estimate principal point (center of image)
+                cx, cy = width / 2, height / 2
+                
+                if focal_length:
+                    return {
+                        'width': width,
+                        'height': height,
+                        'params': [focal_length, cx, cy, 0, 0],  # fx, cx, cy, k1, k2
+                        'model': 'SIMPLE_PINHOLE'
+                    }
+                else:
+                    return {
+                        'width': width,
+                        'height': height,
+                        'params': [max(width, height), cx, cy, 0, 0],  # Default focal length
+                        'model': 'SIMPLE_PINHOLE'
+                    }
+        except ImportError:
+            print("exifread not available, using default calibration")
+        except Exception as e:
+            print(f"Error extracting EXIF: {e}")
+        
+        return None
+        
+    def run_colmap_sfm(self, image_dir, output_path, database_path, painting_name):
+        """Run COLMAP SfM on a set of images with detailed logging"""
+        log_step("Registration", painting_name)
+        
         try:
             # Create database
+            log_step("Creating database", painting_name)
             database = pycolmap.Database(str(database_path))
+            print(f"Database created: {database_path}")
             
             # Import images to database
+            log_step("Importing images", painting_name)
             pycolmap.import_images(str(database_path), str(image_dir))
+            print(f"Images imported to database")
             
             # Extract features
+            log_step("Feature extraction", painting_name)
             pycolmap.extract_features(str(database_path), str(image_dir))
+            print(f"Features extracted")
             
             # Match features
+            log_step("Feature matching", painting_name)
             pycolmap.match_exhaustive(str(database_path))
+            print(f"Features matched")
             
             # Run incremental mapping
+            log_step("Preliminary camera position determination", painting_name)
             reconstructions = pycolmap.incremental_mapping(
                 database_path=str(database_path),
                 image_path=str(image_dir),
                 output_path=str(output_path)
             )
+            print(f"Initial reconstruction completed")
             
             # Return the first (and usually only) reconstruction
             if reconstructions:
-                return list(reconstructions.values())[0]
+                recon = list(reconstructions.values())[0]
+                
+                # Calculate reprojection error
+                if hasattr(recon, 'points3D') and recon.points3D:
+                    total_error = 0
+                    total_points = 0
+                    for point3D in recon.points3D.values():
+                        if hasattr(point3D, 'error'):
+                            total_error += point3D.error
+                            total_points += 1
+                    
+                    if total_points > 0:
+                        avg_error = total_error / total_points
+                        print(f"Average reprojection error: {avg_error:.4f} pixels")
+                
+                return recon
             return None
         except Exception as e:
             print(f"COLMAP failed for {image_dir}: {e}")
@@ -62,54 +144,55 @@ class PaintingReconstructor:
     
     def estimate_global_camera_calibration(self):
         """Estimate global camera calibration from all painting sets"""
-        print("Estimating global camera calibration...")
+        log_step("Preliminary global camera intrinsic determination")
         
-        all_cameras = []
+        # Try to get calibration from first image's EXIF
+        first_image = None
         for painting_set in self.painting_sets:
-            temp_output = self.output_dir / f"temp_{painting_set.name}"
-            temp_output.mkdir(exist_ok=True)
-            
-            recon = self.run_colmap_sfm(
-                painting_set, 
-                temp_output, 
-                temp_output / 'sfm.db'
-            )
-            
-            if recon and recon.cameras:
-                # Get camera parameters from this set
-                for camera_id, camera in recon.cameras.items():
-                    all_cameras.append({
-                        'width': camera.width,
-                        'height': camera.height,
-                        'params': camera.params.tolist() if hasattr(camera.params, 'tolist') else list(camera.params),
-                        'model': str(camera.model)
-                    })
+            image_files = list(painting_set.glob('*.jpg')) + list(painting_set.glob('*.jpeg')) + list(painting_set.glob('*.png'))
+            if image_files:
+                first_image = image_files[0]
+                break
         
-        if not all_cameras:
-            print("No camera data found. Using default parameters.")
-            return config.DEFAULT_CAMERA_PARAMS
+        if first_image:
+            exif_calibration = self.extract_exif_calibration(first_image)
+            if exif_calibration:
+                print(f"EXIF calibration found: focal_length={exif_calibration['params'][0]:.2f}")
+                return exif_calibration
         
-        # Use the most common camera parameters
-        # For simplicity, we'll use the first camera's parameters
-        # In a more sophisticated approach, you could average parameters
-        return all_cameras[0]
+        print("No EXIF calibration found, using default parameters")
+        return config.DEFAULT_CAMERA_PARAMS
     
     def process_painting_set(self, painting_set_path, painting_name):
-        """Process a single painting set"""
-        print(f"\nProcessing painting set: {painting_name}")
+        """Process a single painting set with detailed logging"""
+        log_step("Processing painting set", painting_name)
         
         # Run COLMAP SfM
         recon = self.run_colmap_sfm(
             painting_set_path, 
             self.output_dir / painting_name,
-            self.output_dir / painting_name / 'database.db'
+            self.output_dir / painting_name / 'database.db',
+            painting_name
         )
         
         if not recon:
             print(f"❌ COLMAP reconstruction failed for {painting_name}")
             return None
         
+        # Store local camera calibration
+        if recon.cameras:
+            ref_camera_id = list(recon.cameras.keys())[0]
+            camera = recon.cameras[ref_camera_id]
+            self.local_camera_calibrations[painting_name] = {
+                'width': camera.width,
+                'height': camera.height,
+                'params': camera.params.tolist() if hasattr(camera.params, 'tolist') else list(camera.params),
+                'model': str(camera.model)
+            }
+            print(f"Local camera calibration stored for {painting_name}")
+        
         # Find the painting plane
+        log_step("Point cloud generation", painting_name)
         plane_normal, plane_center = self.find_painting_plane(recon, None)
         
         # Get camera parameters
@@ -143,10 +226,13 @@ class PaintingReconstructor:
                 return None
         
         # Rectify all images
+        log_step("Painting plane determination", painting_name)
         rectified_images = []
         image_files = list(painting_set_path.glob('*.jpg')) + list(painting_set_path.glob('*.jpeg')) + list(painting_set_path.glob('*.png'))
         
-        for image_file in image_files:
+        for i, image_file in enumerate(image_files):
+            print(f"Processing image {i+1}/{len(image_files)}: {image_file.name}")
+            
             # Create a simple image object for rectification
             class SimpleImage:
                 def __init__(self, name):
@@ -164,28 +250,31 @@ class PaintingReconstructor:
                 # Save rectified image
                 output_path = self.rectified_dir / f"{painting_name}_{image_file.stem}_rectified.jpg"
                 cv2.imwrite(str(output_path), rectified)
+                print(f"Saved rectified image: {output_path.name}")
         
         if not rectified_images:
             print(f"❌ No images could be rectified for {painting_name}")
             return None
         
-        # Create fusion
-        fused = self.create_fusion(rectified_images)
-        if fused is not None:
-            # Save fused image
-            output_path = self.fused_dir / f"{painting_name}_fused.jpg"
-            cv2.imwrite(str(output_path), fused)
-            print(f"✅ Created fusion for {painting_name}")
-            return {
-                'painting_name': painting_name,
-                'num_images': len(rectified_images),
-                'plane_normal': plane_normal.tolist(),
-                'plane_center': plane_center.tolist(),
-                'camera_params': self.to_serializable(camera_params)
-            }
-        else:
-            print(f"❌ Failed to create fusion for {painting_name}")
-            return None
+        # Create overview (highly reduced orthorectified pictures)
+        log_step("Creating painting overview", painting_name)
+        if rectified_images:
+            # Create a simple overview by averaging all rectified images
+            overview = np.mean(rectified_images, axis=0).astype(np.uint8)
+            overview_path = self.rectified_dir / f"{painting_name}_overview.jpg"
+            cv2.imwrite(str(overview_path), overview)
+            print(f"Overview saved: {overview_path.name}")
+        
+        # Skip rest of processing for now (as requested)
+        print("Skipping advanced post-processing (commented out)")
+        
+        return {
+            'painting_name': painting_name,
+            'num_images': len(rectified_images),
+            'plane_normal': plane_normal.tolist(),
+            'plane_center': plane_center.tolist(),
+            'camera_params': self.to_serializable(camera_params)
+        }
     
     def find_painting_plane(self, recon, ref_image):
         """Find the painting plane using RANSAC"""
@@ -201,7 +290,8 @@ class PaintingReconstructor:
             return np.array([0, 0, 1]), np.array([0, 0, 0])
         
         points3D = np.array(points3D)
-        
+        print(f"Using {len(points3D)} 3D points for plane fitting")
+
         # Use RANSAC to find the dominant plane
         best_normal = None
         best_center = None
@@ -242,7 +332,7 @@ class PaintingReconstructor:
         ])
 
     def rectify_image_to_plane(self, image, recon, K, plane_normal, plane_center, image_dir):
-        """Rectify image to painting plane"""
+        """Rectify image to painting plane (orthorectification)"""
         # Get camera pose from the reconstruction
         img_obj = None
         for img_id, img in recon.images.items():
@@ -292,7 +382,7 @@ class PaintingReconstructor:
         
         # Create camera projection matrix
         P = K @ pose[:3]  # camera projection matrix
-        
+
         # Create rectification grid
         grid_size = config.GRID_SIZE
         
@@ -376,6 +466,58 @@ class PaintingReconstructor:
         
         return rectified
     
+    def compare_local_calibrations(self):
+        """Compare local camera calibration results"""
+        log_step("Comparison between local camera calibration results")
+        
+        if not self.local_camera_calibrations:
+            print("No local calibrations to compare")
+            return
+        
+        print("Local camera calibrations:")
+        for painting_name, calibration in self.local_camera_calibrations.items():
+            params = calibration['params']
+            print(f"  {painting_name}: focal_length={params[0]:.2f}, cx={params[1]:.2f}, cy={params[2]:.2f}")
+        
+        # Calculate average calibration
+        if len(self.local_camera_calibrations) > 1:
+            avg_params = np.mean([cal['params'] for cal in self.local_camera_calibrations.values()], axis=0)
+            print(f"Average calibration: focal_length={avg_params[0]:.2f}, cx={avg_params[1]:.2f}, cy={avg_params[2]:.2f}")
+    
+    def global_bundle_adjustment(self):
+        """Global bundle adjustment (minimization of reprojection errors for all painting bundles)"""
+        log_step("Global bundle adjustment")
+        
+        # For now, we'll use the average of local calibrations
+        # In a more sophisticated implementation, you would run actual bundle adjustment
+        if self.local_camera_calibrations:
+            avg_params = np.mean([cal['params'] for cal in self.local_camera_calibrations.values()], axis=0)
+            ref_calibration = list(self.local_camera_calibrations.values())[0]
+            
+            self.global_camera_params = {
+                'width': ref_calibration['width'],
+                'height': ref_calibration['height'],
+                'params': avg_params.tolist(),
+                'model': ref_calibration['model']
+            }
+            
+            print(f"Global camera calibration updated: focal_length={avg_params[0]:.2f}")
+        else:
+            print("No local calibrations available for global adjustment")
+    
+    def recalculate_all_positions(self):
+        """Recalculation of all camera positions using new global camera intrinsic"""
+        log_step("Recalculation of all camera positions using new global camera intrinsic")
+        
+        if not self.global_camera_params:
+            print("No global camera parameters available")
+            return
+        
+        print("Recalculating camera positions with global calibration...")
+        # This would involve re-running COLMAP with the global calibration
+        # For now, we'll just log that this step would be performed
+        print("(This step would re-run COLMAP with global calibration)")
+    
     def remove_reflections(self, image):
         """Remove reflections using frequency domain filtering"""
         # Convert to LAB color space
@@ -456,7 +598,7 @@ class PaintingReconstructor:
         return val
 
     def process_all_paintings(self):
-        """Process all painting sets"""
+        """Process all painting sets with comprehensive logging"""
         print("Starting painting reconstruction...")
         
         # Estimate global camera calibration
@@ -464,58 +606,42 @@ class PaintingReconstructor:
         
         results = {}
         
+        # Process each painting set
         for painting_set in self.painting_sets:
             painting_name = painting_set.name
-            print(f"\n{'='*50}")
+            print(f"\n{'='*80}")
             print(f"Processing painting {painting_name}")
-            print(f"{'='*50}")
+            print(f"{'='*80}")
             
             # Process this painting set
             result = self.process_painting_set(painting_set, painting_name)
             
             if result is not None:
-                # The result structure is now different, so we need to adjust how we access data
-                painting_name = result['painting_name']
-                num_images = result['num_images']
-                plane_normal = np.array(result['plane_normal'])
-                plane_center = np.array(result['plane_center'])
-                camera_params = result['camera_params']
-                
-                # Create super-resolution fusion
-                fused_image = self.create_super_resolution_fusion(None) # Pass None as rectified_images are saved
-                
-                if fused_image is not None:
-                    # Save results
-                    cv2.imwrite(str(self.fused_dir / f"{painting_name}_fused.jpg"), fused_image)
-                    
-                    # Save individual rectified images
-                    # The rectified images are already saved in process_painting_set
-                    
-                    results[painting_name] = {
-                        'camera_matrix': camera_params['params'], # Assuming params is the camera matrix
-                        'plane_normal': plane_normal.tolist(),
-                        'plane_center': plane_center.tolist(),
-                        'num_images': num_images
-                    }
-                    
-                    print(f"✅ Painting {painting_name} processed successfully")
-                    print(f"   - {num_images} images rectified")
-                    print(f"   - Super-resolution fusion created")
-                else:
-                    print(f"❌ Failed to create fusion for {painting_name}")
+                results[painting_name] = result
+                print(f"✅ Painting {painting_name} processed successfully")
             else:
                 print(f"❌ Failed to process {painting_name}")
+        
+        # Compare local calibrations
+        self.compare_local_calibrations()
+        
+        # Global bundle adjustment
+        self.global_bundle_adjustment()
+        
+        # Recalculate all positions
+        self.recalculate_all_positions()
         
         # Save calibration data
         with open(self.calibration_dir / 'camera_calibration.json', 'w') as f:
             json.dump(self.to_serializable({
                 'global_camera_params': self.global_camera_params,
+                'local_camera_calibrations': self.local_camera_calibrations,
                 'painting_results': results
             }), f, indent=2)
         
-        print(f"\n{'='*50}")
+        print(f"\n{'='*80}")
         print("RECONSTRUCTION COMPLETE")
-        print(f"{'='*50}")
+        print(f"{'='*80}")
         print(f"Results saved in: {self.output_dir}")
         print(f"Fused images: {self.fused_dir}")
         print(f"Rectified images: {self.rectified_dir}")

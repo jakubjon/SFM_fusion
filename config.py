@@ -5,7 +5,7 @@ PHOTOS_DIR = 'Photos'
 OUTPUT_DIR = 'outputs'
 
 # Processing parameters
-GRID_SIZE = 2000  # Resolution of rectified images
+GRID_SIZE = 512  # Resolution of rectified images (reduced for performance)
 RANSAC_ITERATIONS = 100  # Number of RANSAC iterations for plane fitting
 PLANE_THRESHOLD = 0.1  # Distance threshold for plane inliers (meters)
 
