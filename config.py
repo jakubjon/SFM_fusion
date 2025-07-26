@@ -47,10 +47,10 @@ VERBOSE = True            # Print detailed progress information
 # Processing steps configuration
 PROCESSING_STEPS = {
     'run_local_sfm': False,           # Step 1: Run local SfM for initial camera positions and using initial camera calibration
-    'global_calibration': True,      # Step 2: Global camera calibration adjustment (using selected distortion model radial by default)
-    'recalculate_positions': True,   # Step 3: Recalculate camera positions of each individual painting batch with global calibration
-    'point_cloud_generation': True,  # Step 4: Point cloud generation for each individual painting batch with global calibration
-    'rectification': True,           # Step 5: Image low resolution rectification of all individual pictures of each individual painting batches with global calibration and creating overviews for each batch
+    'global_calibration': False,      # Step 2: Global camera calibration adjustment (using selected distortion model radial by default)
+    'recalculate_positions': False,   # Step 3: Recalculate camera positions of each individual painting batch with global calibration
+    'point_cloud_generation': False,  # Step 4: Point cloud generation for each individual painting batch with global calibration
+    'rectification': False,           # Step 5: Image low resolution rectification of all individual pictures of each individual painting batches with global calibration and creating overviews for each batch
     'manual_roi_selection': True,    # Step 6: Allowing user to manually select ROI for each overview
     'high_res_rectification': True   # Step 7: Generate high resolution orthorectified images individual pictures for ROI
 }

@@ -124,27 +124,35 @@ class HighResRectificationStep(StepBase):
             
             points_2d_plane = np.array(points_2d_plane)
             
-            # Step 4: Find the full painting bounds
+            # Step 4: Find the full painting bounds (same as low-res rectification)
             min_u, min_v = points_2d_plane.min(axis=0)
             max_u, max_v = points_2d_plane.max(axis=0)
             
-            # Step 5: Map ROI bounds to 2D plane coordinates
+            # Add margin (same as low-res rectification)
+            margin = config.RECTIFICATION_CONFIG['envelope_margin']
+            u_range = max_u - min_u
+            v_range = max_v - min_v
+            min_u -= u_range * margin
+            max_u += u_range * margin
+            min_v -= v_range * margin
+            max_v += v_range * margin
+            
+            # Step 5: Map ROI bounds from overview to 2D plane coordinates
+            # The overview image was created with a specific grid size (config.GRID_SIZE // 2)
+            overview_grid_size = config.GRID_SIZE // 2
+            
             # Extract ROI bounds from the overview image
             roi_x_min = roi_bounds['x_min']
             roi_x_max = roi_bounds['x_max']
             roi_y_min = roi_bounds['y_min']
             roi_y_max = roi_bounds['y_max']
             
-            # Convert ROI bounds to 2D plane coordinates
-            # This assumes the overview image corresponds to the full painting plane
-            overview_width = 1024  # Assuming overview is 1024x1024
-            overview_height = 1024
-            
-            # Map ROI to 2D plane coordinates
-            roi_min_u = min_u + (roi_x_min / overview_width) * (max_u - min_u)
-            roi_max_u = min_u + (roi_x_max / overview_width) * (max_u - min_u)
-            roi_min_v = min_v + (roi_y_min / overview_height) * (max_v - min_v)
-            roi_max_v = min_v + (roi_y_max / overview_height) * (max_v - min_v)
+            # Map ROI coordinates from overview grid to 2D plane coordinates
+            # This is the inverse of how the overview was created
+            roi_min_u = min_u + (roi_x_min / overview_grid_size) * (max_u - min_u)
+            roi_max_u = min_u + (roi_x_max / overview_grid_size) * (max_u - min_u)
+            roi_min_v = min_v + (roi_y_min / overview_grid_size) * (max_v - min_v)
+            roi_max_v = min_v + (roi_y_max / overview_grid_size) * (max_v - min_v)
             
             # Step 6: Create high resolution grid for ROI
             grid_size = target_resolution
