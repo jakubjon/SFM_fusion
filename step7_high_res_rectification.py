@@ -1,5 +1,5 @@
 """
-Step 7: Generate high resolution orthorectified images individual pictures for ROI
+Step 7: Generate high resolution orthorectified images for ROI using true orthorectification
 """
 
 import cv2
@@ -9,10 +9,11 @@ from datetime import datetime
 from step_base import StepBase
 import config
 import pycolmap
+from camera_utils import CameraProjector, PlaneProjector, create_rectification_grid, rectify_image_true_ortho_global
 
 
 class HighResRectificationStep(StepBase):
-    """Step 7: High resolution rectification for ROI"""
+    """Step 7: High resolution true orthorectification for ROI"""
     
     def __init__(self, photos_dir=config.PHOTOS_DIR, output_dir=config.OUTPUT_DIR):
         super().__init__(output_dir)
@@ -35,205 +36,97 @@ class HighResRectificationStep(StepBase):
         for painting_set in self.painting_sets:
             painting_name = painting_set.name
             outputs.extend([
-                f"high_res_rectified/{painting_name}_high_res_*.jpg",
+                f"high_res_rectified/{painting_name}_high_res_*.png",
                 f"intermediate/high_res_rectification_data_{painting_name}.json"
             ])
         outputs.append("intermediate/step7_high_res_rectification_results.json")
         return outputs
+
     
-    def qvec2rotmat(self, qvec):
-        """Convert quaternion to rotation matrix"""
-        w, x, y, z = qvec
-        return np.array([
-            [1 - 2*y**2 - 2*z**2, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
-            [2*x*y + 2*z*w, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*x*w],
-            [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x**2 - 2*y**2]
-        ])
-    
-    def rectify_image_high_res(self, image_path, pose_data, K, plane_normal, plane_center, 
-                              roi_bounds, painting_name, target_resolution=2048):
-        """High resolution rectification for ROI using proper 2D coordinate system"""
-        # Load the image
+    def rectify_image_high_res_roi_global(self, image_path, pose_data, camera_projector, 
+                                         plane_projector, global_roi_grid_points_3d, 
+                                         target_resolution, painting_name, grid_info):
+        """High resolution true orthorectification for ROI area using global grid with proper cropping"""
         img = cv2.imread(str(image_path))
-        if img is None:
+        if img is None: 
             print(f"Could not load image: {image_path}")
             return None
-        
-        # Extract pose information
-        if not pose_data:
-            print(f"No pose data available for {image_path.name}")
+        if not pose_data: 
+            print(f"No pose data for: {image_path}")
             return None
         
-        # Create camera projection matrix
-        rotation_matrix = np.array(pose_data['rotation_matrix'])
-        translation = np.array(pose_data['translation'])
+        # Get camera pose
+        R = np.array(pose_data['rotation_matrix'])
+        t = np.array(pose_data['translation'])
         
-        # Create pose matrix
-        pose = np.eye(4)
-        pose[:3, :3] = rotation_matrix
-        pose[:3, 3] = translation
+        # Initialize output image with proper dimensions based on grid_info
+        grid_width = grid_info['grid_width']
+        grid_height = grid_info['grid_height']
         
-        # Create camera projection matrix
-        P = K @ pose[:3]  # camera projection matrix
-
-        # Step 1: Create 2D coordinate system on the painting plane
-        # Create two vectors perpendicular to the normal
-        if abs(plane_normal[0]) < 0.9:
-            v1 = np.array([1, 0, 0])
-        else:
-            v1 = np.array([0, 1, 0])
-        v2 = np.cross(plane_normal, v1)
-        v1 = np.cross(v2, plane_normal)
+        # Create output image with the actual ROI dimensions
+        rectified = np.zeros((grid_height, grid_width, 3), dtype=np.uint8)
+        valid_samples = 0
+        total_projections = 0
         
-        # Normalize
-        v1 = v1 / np.linalg.norm(v1)
-        v2 = v2 / np.linalg.norm(v2)
-        
-        # Step 2: Load 3D points from COLMAP reconstruction
-        reconstruction_path = self.output_dir / painting_name / 'global' / '0'
-        if not reconstruction_path.exists():
-            print(f"[ERROR] COLMAP reconstruction not found for {painting_name}")
-            return None
-        
-        try:
-            # Load the reconstruction
-            reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
-            points3D = reconstruction.points3D
+        # For shape-aware grids, we need to create a proper mapping
+        # Since we only have the valid points, we'll create a simple linear mapping
+        if len(global_roi_grid_points_3d) > 0:
+            # Create a mapping from grid index to output coordinates
+            # We'll use a simple approach: map the points linearly to the output grid
+            points_per_row = max(1, len(global_roi_grid_points_3d) // grid_height)
             
-            if len(points3D) < 10:
-                print(f"Not enough 3D points for high-res rectification: {image_path.name}")
-                return None
-            
-            # Extract 3D point coordinates
-            points3D_coords = []
-            for point3D in points3D.values():
-                points3D_coords.append(point3D.xyz)
-            
-            points3D_coords = np.array(points3D_coords)
-            
-            # Step 3: Project all 3D points to the 2D coordinate system
-            points_2d_plane = []
-            for point_3d in points3D_coords:
-                # Vector from plane center to point
-                vec = point_3d - plane_center
+            # Process each 3D point in the ROI grid
+            for idx, point_3d_world in enumerate(global_roi_grid_points_3d):
+                # Transform world point to camera coordinates
+                point_cam = R @ point_3d_world + t
                 
-                # Project to 2D coordinate system
-                u = np.dot(vec, v1)
-                v = np.dot(vec, v2)
-                points_2d_plane.append([u, v])
-            
-            points_2d_plane = np.array(points_2d_plane)
-            
-            # Step 4: Find the full painting bounds (same as low-res rectification)
-            min_u, min_v = points_2d_plane.min(axis=0)
-            max_u, max_v = points_2d_plane.max(axis=0)
-            
-            # Add margin (same as low-res rectification)
-            margin = config.RECTIFICATION_CONFIG['envelope_margin']
-            u_range = max_u - min_u
-            v_range = max_v - min_v
-            min_u -= u_range * margin
-            max_u += u_range * margin
-            min_v -= v_range * margin
-            max_v += v_range * margin
-            
-            # Step 5: Map ROI bounds from overview to 2D plane coordinates
-            # The overview image was created with a specific grid size (config.GRID_SIZE // 2)
-            overview_grid_size = config.GRID_SIZE // 2  # This is 256
-            
-            # Extract ROI bounds from the overview image
-            roi_x_min = roi_bounds['x_min']
-            roi_x_max = roi_bounds['x_max']
-            roi_y_min = roi_bounds['y_min']
-            roi_y_max = roi_bounds['y_max']
-            
-            # Map ROI coordinates from overview image pixels to 2D plane coordinates
-            # Calculate the step size in 2D plane coordinates per overview pixel
-            u_step = (max_u - min_u) / (overview_grid_size - 1)
-            v_step = (max_v - min_v) / (overview_grid_size - 1)
-            
-            # Map ROI pixel coordinates to 2D plane coordinates
-            roi_min_u = min_u + roi_x_min * u_step
-            roi_max_u = min_u + roi_x_max * u_step
-            roi_min_v = min_v + roi_y_min * v_step
-            roi_max_v = min_v + roi_y_max * v_step
-            
-            # Step 6: Create high resolution grid for the FULL painting area (same as Step 5)
-            # Use a larger grid size for high resolution
-            full_grid_size = target_resolution * 2  # Create larger grid to ensure ROI is covered
-            rectified_points_3d = []
-            
-            for i in range(full_grid_size):
-                for j in range(full_grid_size):
-                    # Map grid coordinates to full painting coordinates (same as Step 5)
-                    u = min_u + (i / (full_grid_size - 1)) * (max_u - min_u)
-                    v = min_v + (j / (full_grid_size - 1)) * (max_v - min_v)
+                # Project to image coordinates
+                point_2d = camera_projector.project_point(point_cam)
+                total_projections += 1
+                
+                if point_2d is not None:
+                    x, y = point_2d
                     
-                    # Convert back to 3D
-                    point_3d = plane_center + u * v1 + v * v2
-                    rectified_points_3d.append(point_3d)
-            
-            rectified_points_3d = np.array(rectified_points_3d)
-            
-            # Step 7: Project rectified points to image (same as Step 5)
-            src_points = []
-            dst_points = []
-            
-            for i, point_3d in enumerate(rectified_points_3d):
-                point_homo = np.append(point_3d, 1)
-                point_img = P @ point_homo
-                point_img = point_img[:2] / point_img[2]
-                
-                # Check if point is in image bounds
-                if (0 <= point_img[0] < img.shape[1] and 
-                    0 <= point_img[1] < img.shape[0]):
-                    src_points.append(point_img)
-                    # Map to rectified coordinates
-                    dst_points.append([i % full_grid_size, i // full_grid_size])
-            
-            if len(src_points) < 4:
-                print(f"Not enough valid points for high-res rectification: {image_path.name}")
-                return None
-            
-            src_points = np.array(src_points, dtype=np.float32)
-            dst_points = np.array(dst_points, dtype=np.float32)
-            
-            # Step 8: Compute homography and apply rectification (same as Step 5)
-            H = cv2.findHomography(src_points, dst_points)[0]
-            full_rectified = cv2.warpPerspective(img, H, (full_grid_size, full_grid_size))
-            
-            # Step 9: Crop the full rectified image to ROI area
-            # Map ROI bounds to the full grid coordinates
-            roi_min_i = int((roi_min_u - min_u) / (max_u - min_u) * (full_grid_size - 1))
-            roi_max_i = int((roi_max_u - min_u) / (max_u - min_u) * (full_grid_size - 1))
-            roi_min_j = int((roi_min_v - min_v) / (max_v - min_v) * (full_grid_size - 1))
-            roi_max_j = int((roi_max_v - min_v) / (max_v - min_v) * (full_grid_size - 1))
-            
-            # Ensure bounds are within the full grid
-            roi_min_i = max(0, min(full_grid_size - 1, roi_min_i))
-            roi_max_i = max(0, min(full_grid_size - 1, roi_max_i))
-            roi_min_j = max(0, min(full_grid_size - 1, roi_min_j))
-            roi_max_j = max(0, min(full_grid_size - 1, roi_max_j))
-            
-            # Crop to ROI
-            roi_rectified = full_rectified[roi_min_j:roi_max_j+1, roi_min_i:roi_max_i+1]
-            
-            # Resize to target resolution if needed
-            if roi_rectified.shape[0] != target_resolution or roi_rectified.shape[1] != target_resolution:
-                roi_rectified = cv2.resize(roi_rectified, (target_resolution, target_resolution))
-            
-            # Debug: Print ROI mapping information
-            print(f"  ROI overview coords: ({roi_x_min}, {roi_y_min}) to ({roi_x_max}, {roi_y_max})")
-            print(f"  ROI plane coords: ({roi_min_u:.4f}, {roi_min_v:.4f}) to ({roi_max_u:.4f}, {roi_max_v:.4f})")
-            print(f"  ROI grid coords: ({roi_min_i}, {roi_min_j}) to ({roi_max_i}, {roi_max_j})")
-            print(f"  Full grid size: {full_grid_size}x{full_grid_size}")
-            print(f"  ROI crop size: {roi_rectified.shape[1]}x{roi_rectified.shape[0]}")
-            print(f"  Output resolution: {target_resolution}x{target_resolution}")
-            
-            return roi_rectified
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to load reconstruction for {painting_name}: {e}")
+                    # Check if point is within image bounds
+                    if 0 <= x < img.shape[1] and 0 <= y < img.shape[0]:
+                        # Bilinear interpolation
+                        x0, y0 = int(x), int(y)
+                        x1, y1 = min(x0 + 1, img.shape[1] - 1), min(y0 + 1, img.shape[0] - 1)
+                        
+                        # Calculate interpolation weights
+                        wx = x - x0
+                        wy = y - y0
+                        
+                        # Sample pixels
+                        p00 = img[y0, x0].astype(np.float32)
+                        p01 = img[y0, x1].astype(np.float32)
+                        p10 = img[y1, x0].astype(np.float32)
+                        p11 = img[y1, x1].astype(np.float32)
+                        
+                        # Interpolate
+                        pixel_value = (p00 * (1 - wx) * (1 - wy) + 
+                                     p01 * wx * (1 - wy) + 
+                                     p10 * (1 - wx) * wy + 
+                                     p11 * wx * wy)
+                        
+                        # Map to output coordinates
+                        output_i = idx // points_per_row
+                        output_j = idx % points_per_row
+                        
+                        if 0 <= output_i < grid_height and 0 <= output_j < grid_width:
+                            rectified[output_i, output_j] = pixel_value.astype(np.uint8)
+                            valid_samples += 1
+        
+        print(f"Rectification stats: {valid_samples}/{total_projections} valid projections, {valid_samples} valid samples")
+        
+        if valid_samples > 0:
+            mean_value = np.mean(rectified)
+            print(f"High-res rectified image mean value: {mean_value:.2f}")
+            if mean_value < 10: 
+                print(f"WARNING: High-res rectified image is very dark (mean={mean_value:.2f})")
+            return rectified
+        else:
+            print(f"WARNING: No valid samples for {image_path}")
             return None
     
     def apply_enhancement(self, image):
@@ -284,12 +177,12 @@ class HighResRectificationStep(StepBase):
     
     def run(self, **kwargs):
         """
-        Generate high resolution orthorectified images for ROI.
+        Generate high resolution orthorectified images for ROI using true orthorectification.
         
         Returns:
             dict: Results containing high resolution rectification data
         """
-        self.log_step("Step 7: High resolution rectification for ROI")
+        self.log_step("Step 7: High resolution true orthorectification for ROI")
         
         # Load global reconstructions from Step 3
         step3_results = self.load_result("step3_recalculate_positions_results")
@@ -325,7 +218,7 @@ class HighResRectificationStep(StepBase):
         for painting_set in self.painting_sets:
             painting_name = painting_set.name
             print(f"\n{'='*80}")
-            print(f"High resolution rectification for painting {painting_name}")
+            print(f"High resolution true orthorectification for painting {painting_name}")
             print(f"{'='*80}")
             
             # Check if we already have high res rectification data
@@ -351,28 +244,18 @@ class HighResRectificationStep(StepBase):
                 print(f"[ERROR] No ROI selection found for {painting_name}")
                 continue
             
-            roi_bounds = roi_data.get('roi_bounds', {})
-            if not roi_bounds:
-                print(f"[ERROR] No ROI bounds found for {painting_name}")
+            roi_bounds_plane = roi_data.get('roi_bounds_plane', {})
+            if not roi_bounds_plane:
+                print(f"[ERROR] No ROI plane bounds found for {painting_name}")
                 continue
             
-            # Extract camera intrinsics from global calibration
-            if isinstance(global_camera_params, dict):
-                params = global_camera_params['params']
-                if len(params) >= 4:  # SIMPLE_RADIAL has 4 parameters
-                    fx, cx, cy, k1 = params[:4]
-                    K = np.array([[fx, 0, cx], [0, fx, cy], [0, 0, 1]])
-                    print(f"Using global calibration: focal_length={fx:.2f}, k1={k1:.6f}")
-                else:
-                    print(f"Invalid global camera parameters for {painting_name}")
-                    continue
-            else:
-                print(f"Invalid global camera parameters format for {painting_name}")
-                continue
+            # Create camera projector with global calibration
+            camera_projector = CameraProjector(global_camera_params)
             
-            # Get plane information (use placeholder if not available)
+            # Create plane projector ONCE for the entire painting
             plane_normal = np.array(plane_data.get('plane_normal', [0, 0, 1]))
             plane_center = np.array(plane_data.get('plane_center', [0, 0, 0]))
+            plane_projector = PlaneProjector(plane_normal, plane_center)
             
             # Get image files
             image_files = list(painting_set.glob('*.jpg')) + list(painting_set.glob('*.jpeg')) + list(painting_set.glob('*.png'))
@@ -384,16 +267,45 @@ class HighResRectificationStep(StepBase):
             # Get camera poses from reconstruction
             images_data = reconstruction_data.get('images', {})
             
+            # Create global high-resolution grid for ROI area ONCE
+            target_resolution = config.RECTIFICATION_CONFIG.get('target_resolution', 2048)
+            print(f"Creating global high-resolution grid for ROI area: {target_resolution}x{target_resolution}")
+            
+            # Extract ROI bounds
+            u_min = roi_bounds_plane['u_min']
+            u_max = roi_bounds_plane['u_max']
+            v_min = roi_bounds_plane['v_min']
+            v_max = roi_bounds_plane['v_max']
+            
+            print(f"ROI bounds in plane coordinates: u=[{u_min:.3f}, {u_max:.3f}], v=[{v_min:.3f}, {v_max:.3f}]")
+            
+            # Get ROI points in plane coordinates for shape-aware grid
+            roi_points_plane = roi_data.get('roi_points_plane', [])
+            if roi_points_plane:
+                print(f"Using {len(roi_points_plane)} ROI points for shape-aware grid")
+                # Create shape-aware grid based on ROI points
+                global_roi_grid_points_3d, grid_info = self.create_shape_aware_roi_grid(
+                    plane_projector, roi_points_plane, target_resolution
+                )
+            else:
+                print("No ROI points found, using rectangular bounds")
+                # Fallback to rectangular grid
+                global_roi_grid_points_3d, grid_info = self.create_rectangular_roi_grid(
+                    plane_projector, roi_bounds_plane, target_resolution
+                )
+            
+            print(f"Created global ROI grid: {len(global_roi_grid_points_3d)} points for {target_resolution}x{target_resolution} resolution")
+            
             high_res_images = []
             rectification_info = {
                 'painting_name': painting_name,
                 'num_images': len(image_files),
                 'high_res_images': [],
-                'roi_bounds': roi_bounds,
+                'roi_bounds_plane': roi_bounds_plane,
                 'global_camera_params': global_camera_params,
                 'plane_normal': plane_normal.tolist(),
                 'plane_center': plane_center.tolist(),
-                'target_resolution': 2048,
+                'target_resolution': target_resolution,
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -411,17 +323,17 @@ class HighResRectificationStep(StepBase):
                     print(f"No pose data found for {image_file.name}")
                     continue
                 
-                # High resolution rectification
-                rectified = self.rectify_image_high_res(
-                    image_file, pose_data, K, plane_normal, plane_center, 
-                    roi_bounds, painting_name, target_resolution=2048
+                # High resolution true orthorectification for ROI using global grid
+                rectified = self.rectify_image_high_res_roi_global(
+                    image_file, pose_data, camera_projector, plane_projector, 
+                    global_roi_grid_points_3d, target_resolution, painting_name, grid_info
                 )
                 
                 if rectified is not None:
-                    # Apply enhancement (rectified already has alpha channel)
+                    # Apply enhancement
                     enhanced = self.apply_enhancement(rectified)
                     
-                    # Save high resolution rectified image with alpha channel as PNG
+                    # Save high resolution rectified image
                     output_path = self.high_res_dir / f"{painting_name}_{image_file.stem}_high_res.png"
                     cv2.imwrite(str(output_path), enhanced)
                     print(f"Saved high res rectified image: {output_path.name}")
@@ -445,7 +357,9 @@ class HighResRectificationStep(StepBase):
             # Save intermediate results
             self.save_result(f"high_res_rectification_data_{painting_name}", rectification_info)
             
-            print(f"[OK] High resolution rectification completed for {painting_name}")
+            print(f"[OK] High resolution true orthorectification completed for {painting_name}")
+            print(f"  ROI plane bounds: {roi_bounds_plane}")
+            print(f"  Target resolution: {target_resolution}x{target_resolution}")
         
         # Save combined results
         step_results = {
@@ -457,9 +371,164 @@ class HighResRectificationStep(StepBase):
         
         self.save_result("step7_high_res_rectification_results", step_results)
         
-        print(f"[OK] Step 7 completed. High resolution rectification for {len(high_res_results)} paintings.")
+        print(f"[OK] Step 7 completed. High resolution true orthorectification for {len(high_res_results)} paintings.")
         
         return step_results
+
+    def create_shape_aware_roi_grid(self, plane_projector, roi_points_plane, target_resolution):
+        """
+        Create shape-aware grid that follows the actual ROI boundaries
+        
+        Args:
+            plane_projector: Plane projector instance
+            roi_points_plane: ROI points in plane coordinates (u, v)
+            target_resolution: Target resolution for output image
+            
+        Returns:
+            Tuple of (grid_points_3d, grid_info) where grid_info contains cropping information
+        """
+        if len(roi_points_plane) < 3:
+            print("Not enough ROI points for shape-aware grid, using rectangular")
+            return self.create_rectangular_roi_grid(plane_projector, 
+                {'u_min': min(p[0] for p in roi_points_plane), 'u_max': max(p[0] for p in roi_points_plane),
+                 'v_min': min(p[1] for p in roi_points_plane), 'v_max': max(p[1] for p in roi_points_plane)}, 
+                target_resolution)
+        
+        # Convert ROI points to numpy array
+        roi_points = np.array(roi_points_plane)
+        
+        # Find bounding box of ROI
+        u_min, v_min = roi_points.min(axis=0)
+        u_max, v_max = roi_points.max(axis=0)
+        
+        # Create a dense grid to sample the ROI area
+        # We'll create a grid that covers the ROI bounding box
+        u_range = u_max - u_min
+        v_range = v_max - v_min
+        
+        # Determine grid density based on target resolution
+        # We want to ensure we have enough points to achieve the target resolution
+        grid_density = max(target_resolution, int(max(u_range, v_range) * 50))  # At least 50 points per unit
+        
+        # Create dense sampling grid
+        grid_points_3d = []
+        valid_indices = []  # Store indices of valid points for cropping
+        valid_points = 0
+        
+        for i in range(grid_density):
+            for j in range(grid_density):
+                # Map grid coordinates to bounding box coordinates
+                u = u_min + (i / (grid_density - 1)) * u_range
+                v = v_min + (j / (grid_density - 1)) * v_range
+                
+                # Check if point is inside ROI polygon
+                point_2d = np.array([u, v])
+                if self.is_point_inside_polygon(point_2d, roi_points):
+                    # Convert to 3D world coordinates
+                    point_3d = plane_projector.plane_2d_to_world(point_2d)
+                    grid_points_3d.append(point_3d)
+                    valid_indices.append((i, j))
+                    valid_points += 1
+        
+        grid_points_3d = np.array(grid_points_3d)
+        
+        # Calculate cropping information
+        if valid_indices:
+            valid_indices = np.array(valid_indices)
+            min_i, min_j = valid_indices.min(axis=0)
+            max_i, max_j = valid_indices.max(axis=0)
+            
+            # Calculate the actual ROI bounds in grid coordinates
+            grid_bounds = {
+                'min_i': min_i, 'max_i': max_i,
+                'min_j': min_j, 'max_j': max_j,
+                'grid_width': max_i - min_i + 1,
+                'grid_height': max_j - min_j + 1,
+                'total_points': len(grid_points_3d)
+            }
+        else:
+            grid_bounds = {
+                'min_i': 0, 'max_i': 0,
+                'min_j': 0, 'max_j': 0,
+                'grid_width': 1, 'grid_height': 1,
+                'total_points': 0
+            }
+        
+        print(f"Shape-aware grid: {valid_points} points inside ROI, grid bounds: {grid_bounds['grid_width']}x{grid_bounds['grid_height']}")
+        
+        return grid_points_3d, grid_bounds
+    
+    def create_rectangular_roi_grid(self, plane_projector, roi_bounds_plane, target_resolution):
+        """
+        Create rectangular grid for ROI area (fallback method)
+        
+        Args:
+            plane_projector: Plane projector instance
+            roi_bounds_plane: ROI bounds in painting plane coordinates
+            target_resolution: Target resolution for output image
+            
+        Returns:
+            Tuple of (grid_points_3d, grid_info) where grid_info contains cropping information
+        """
+        # Extract ROI bounds
+        u_min = roi_bounds_plane['u_min']
+        u_max = roi_bounds_plane['u_max']
+        v_min = roi_bounds_plane['v_min']
+        v_max = roi_bounds_plane['v_max']
+        
+        # Create rectangular grid for ROI area
+        grid_points_3d = []
+        for i in range(target_resolution):
+            for j in range(target_resolution):
+                # Map grid coordinates to ROI plane coordinates
+                u = u_min + (i / (target_resolution - 1)) * (u_max - u_min)
+                v = v_min + (j / (target_resolution - 1)) * (v_max - v_min)
+                
+                # Convert to 3D world coordinates
+                point_3d = plane_projector.plane_2d_to_world(np.array([u, v]))
+                grid_points_3d.append(point_3d)
+        
+        grid_points_3d = np.array(grid_points_3d)
+        
+        # For rectangular grid, the bounds are the full grid
+        grid_bounds = {
+            'min_i': 0, 'max_i': target_resolution - 1,
+            'min_j': 0, 'max_j': target_resolution - 1,
+            'grid_width': target_resolution,
+            'grid_height': target_resolution,
+            'total_points': len(grid_points_3d)
+        }
+        
+        return grid_points_3d, grid_bounds
+    
+    def is_point_inside_polygon(self, point, polygon):
+        """
+        Check if a point is inside a polygon using ray casting algorithm
+        
+        Args:
+            point: 2D point [x, y]
+            polygon: Array of polygon vertices [[x1, y1], [x2, y2], ...]
+            
+        Returns:
+            True if point is inside polygon
+        """
+        x, y = point
+        n = len(polygon)
+        inside = False
+        
+        p1x, p1y = polygon[0]
+        for i in range(n + 1):
+            p2x, p2y = polygon[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        
+        return inside
 
 
 if __name__ == "__main__":
@@ -467,4 +536,4 @@ if __name__ == "__main__":
     step = HighResRectificationStep()
     results = step.run()
     if results:
-        print(f"Step 7 completed. High resolution rectification for {results['num_paintings']} paintings.") 
+        print(f"Step 7 completed. High resolution true orthorectification for {results['num_paintings']} paintings.") 

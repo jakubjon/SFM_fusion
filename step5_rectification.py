@@ -1,5 +1,5 @@
 """
-Step 5: Image low resolution rectification of all individual pictures of each individual painting batches 
+Step 5: True orthorectification of all individual pictures using proper camera projection
 with global calibration and creating overviews for each batch
 """
 
@@ -10,10 +10,11 @@ from datetime import datetime
 from step_base import StepBase
 import config
 import pycolmap
+from camera_utils import CameraProjector, PlaneProjector, create_rectification_grid, rectify_image_true_ortho_global, create_overview_fusion
 
 
 class RectificationStep(StepBase):
-    """Step 5: Image rectification with global calibration"""
+    """Step 5: True orthorectification with global calibration"""
     
     def __init__(self, photos_dir=config.PHOTOS_DIR, output_dir=config.OUTPUT_DIR):
         super().__init__(output_dir)
@@ -42,172 +43,61 @@ class RectificationStep(StepBase):
         outputs.append("intermediate/step5_rectification_results.json")
         return outputs
     
-    def qvec2rotmat(self, qvec):
-        """Convert quaternion to rotation matrix"""
-        w, x, y, z = qvec
-        return np.array([
-            [1 - 2*y**2 - 2*z**2, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
-            [2*x*y + 2*z*w, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*x*w],
-            [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x**2 - 2*y**2]
-        ])
+
     
-    def rectify_image_to_plane(self, image_path, pose_data, K, plane_normal, plane_center, painting_name):
-        """Rectify image to painting plane using proper 2D coordinate system with rectangular envelope"""
+    def create_overview(self, rectified_images, painting_name):
+        """Create overview from multiple rectified images using proper fusion"""
+        if not rectified_images:
+            return None
+        
+        # Use proper fusion instead of simple averaging
+        overview = create_overview_fusion(rectified_images)
+        
+        # Apply basic enhancement
+        if overview is not None:
+            overview = cv2.convertScaleAbs(overview, alpha=1.1, beta=5)
+        
+        return overview
+    
+    def rectify_image_true_ortho_global(self, image_path, pose_data, camera_projector, plane_projector, grid_points_3d, grid_size, painting_name):
+        """True orthorectification using global grid (same grid for all images of painting)"""
         # Load the image
         img = cv2.imread(str(image_path))
         if img is None:
             print(f"Could not load image: {image_path}")
             return None
         
+        print(f"Image loaded: {img.shape}")
+        
         # Extract pose information
         if not pose_data:
             print(f"No pose data available for {image_path.name}")
             return None
         
-        # Create camera projection matrix
-        rotation_matrix = np.array(pose_data['rotation_matrix'])
-        translation = np.array(pose_data['translation'])
+        print(f"Pose data: R shape={np.array(pose_data['rotation_matrix']).shape}, t shape={np.array(pose_data['translation']).shape}")
         
-        # Create pose matrix
-        pose = np.eye(4)
-        pose[:3, :3] = rotation_matrix
-        pose[:3, 3] = translation
+        # Perform true orthorectification using global grid
+        rectified = rectify_image_true_ortho_global(
+            img, camera_projector, pose_data, grid_points_3d, grid_size
+        )
         
-        # Create camera projection matrix
-        P = K @ pose[:3]  # camera projection matrix
-
-        # Step 1: Create 2D coordinate system on the painting plane
-        # Create two vectors perpendicular to the normal
-        if abs(plane_normal[0]) < 0.9:
-            v1 = np.array([1, 0, 0])
-        else:
-            v1 = np.array([0, 1, 0])
-        v2 = np.cross(plane_normal, v1)
-        v1 = np.cross(v2, plane_normal)
+        # Check if rectified image is mostly black
+        if rectified is not None:
+            mean_value = np.mean(rectified)
+            print(f"Rectified image mean value: {mean_value:.2f}")
+            if mean_value < 10:  # Very dark image
+                print(f"WARNING: Rectified image is very dark (mean={mean_value:.2f})")
         
-        # Normalize
-        v1 = v1 / np.linalg.norm(v1)
-        v2 = v2 / np.linalg.norm(v2)
-        
-        # Step 2: Load 3D points from COLMAP reconstruction
-        reconstruction_path = self.output_dir / painting_name / 'global' / '0'
-        if not reconstruction_path.exists():
-            print(f"[ERROR] COLMAP reconstruction not found for {painting_name}")
-            return None
-        
-        try:
-            # Load the reconstruction
-            reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
-            points3D = reconstruction.points3D
-            
-            if len(points3D) < 10:
-                print(f"Not enough 3D points for rectification: {image_path.name}")
-                return None
-            
-            # Extract 3D point coordinates
-            points3D_coords = []
-            for point3D in points3D.values():
-                points3D_coords.append(point3D.xyz)
-            
-            points3D_coords = np.array(points3D_coords)
-            
-            # Step 3: Project all 3D points to the 2D coordinate system
-            points_2d_plane = []
-            for point_3d in points3D_coords:
-                # Vector from plane center to point
-                vec = point_3d - plane_center
-                
-                # Project to 2D coordinate system
-                u = np.dot(vec, v1)
-                v = np.dot(vec, v2)
-                points_2d_plane.append([u, v])
-            
-            points_2d_plane = np.array(points_2d_plane)
-            
-            # Step 4: Find the rectangular envelope
-            min_u, min_v = points_2d_plane.min(axis=0)
-            max_u, max_v = points_2d_plane.max(axis=0)
-            
-            # Add margin
-            margin = config.RECTIFICATION_CONFIG['envelope_margin']
-            u_range = max_u - min_u
-            v_range = max_v - min_v
-            min_u -= u_range * margin
-            max_u += u_range * margin
-            min_v -= v_range * margin
-            max_v += v_range * margin
-            
-            # Step 5: Create the rectification grid
-            grid_size = config.GRID_SIZE // 2  # Reduced resolution for performance
-            rectified_points_3d = []
-            
-            for i in range(grid_size):
-                for j in range(grid_size):
-                    # Map grid coordinates to 2D plane coordinates
-                    u = min_u + (i / (grid_size - 1)) * (max_u - min_u)
-                    v = min_v + (j / (grid_size - 1)) * (max_v - min_v)
-                    
-                    # Convert back to 3D
-                    point_3d = plane_center + u * v1 + v * v2
-                    rectified_points_3d.append(point_3d)
-            
-            rectified_points_3d = np.array(rectified_points_3d)
-            
-            # Step 6: Project rectified points to image
-            src_points = []
-            dst_points = []
-            
-            for i, point_3d in enumerate(rectified_points_3d):
-                point_homo = np.append(point_3d, 1)
-                point_img = P @ point_homo
-                point_img = point_img[:2] / point_img[2]
-                
-                # Check if point is in image bounds
-                if (0 <= point_img[0] < img.shape[1] and 
-                    0 <= point_img[1] < img.shape[0]):
-                    src_points.append(point_img)
-                    # Map to rectified coordinates
-                    dst_points.append([i % grid_size, i // grid_size])
-            
-            if len(src_points) < 4:
-                print(f"Not enough valid points for rectification: {image_path.name}")
-                return None
-            
-            src_points = np.array(src_points, dtype=np.float32)
-            dst_points = np.array(dst_points, dtype=np.float32)
-            
-            # Step 7: Compute homography and apply rectification
-            H = cv2.findHomography(src_points, dst_points)[0]
-            rectified = cv2.warpPerspective(img, H, (grid_size, grid_size))
-            
-            return rectified
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to load reconstruction for {painting_name}: {e}")
-            return None
-    
-    def create_overview(self, rectified_images, painting_name):
-        """Create overview from multiple rectified images"""
-        if not rectified_images:
-            return None
-        
-        # Simple averaging for overview creation
-        # In a more sophisticated implementation, you would use better fusion methods
-        overview = np.mean(rectified_images, axis=0).astype(np.uint8)
-        
-        # Apply basic enhancement
-        overview = cv2.convertScaleAbs(overview, alpha=1.1, beta=5)
-        
-        return overview
+        return rectified
     
     def run(self, **kwargs):
         """
-        Perform low resolution rectification for all paintings.
+        Perform true orthorectification for all paintings.
         
         Returns:
             dict: Results containing rectification data for each painting
         """
-        self.log_step("Step 5: Low resolution rectification with global calibration")
+        self.log_step("Step 5: True orthorectification with global calibration")
         
         # Load global reconstructions from Step 3
         step3_results = self.load_result("step3_recalculate_positions_results")
@@ -235,7 +125,7 @@ class RectificationStep(StepBase):
         for painting_set in self.painting_sets:
             painting_name = painting_set.name
             print(f"\n{'='*80}")
-            print(f"Rectifying images for painting {painting_name}")
+            print(f"True orthorectification for painting {painting_name}")
             print(f"{'='*80}")
             
             # Check if we already have rectification data
@@ -255,23 +145,13 @@ class RectificationStep(StepBase):
             point_cloud_info = point_cloud_data.get(painting_name, {})
             plane_data = point_cloud_info.get('plane_data', {})
             
-            # Extract camera intrinsics from global calibration
-            if isinstance(global_camera_params, dict):
-                params = global_camera_params['params']
-                if len(params) >= 4:  # SIMPLE_RADIAL has 4 parameters
-                    fx, cx, cy, k1 = params[:4]
-                    K = np.array([[fx, 0, cx], [0, fx, cy], [0, 0, 1]])
-                    print(f"Using global calibration: focal_length={fx:.2f}, k1={k1:.6f}")
-                else:
-                    print(f"Invalid global camera parameters for {painting_name}")
-                    continue
-            else:
-                print(f"Invalid global camera parameters format for {painting_name}")
-                continue
+            # Create camera projector with global calibration
+            camera_projector = CameraProjector(global_camera_params)
             
-            # Get plane information (use placeholder if not available)
+            # Create plane projector ONCE for the entire painting
             plane_normal = np.array(plane_data.get('plane_normal', [0, 0, 1]))
             plane_center = np.array(plane_data.get('plane_center', [0, 0, 0]))
+            plane_projector = PlaneProjector(plane_normal, plane_center)
             
             # Get image files
             image_files = list(painting_set.glob('*.jpg')) + list(painting_set.glob('*.jpeg')) + list(painting_set.glob('*.png'))
@@ -291,9 +171,77 @@ class RectificationStep(StepBase):
                 'global_camera_params': global_camera_params,
                 'plane_normal': plane_normal.tolist(),
                 'plane_center': plane_center.tolist(),
+                'grid_bounds': None,
                 'timestamp': datetime.now().isoformat()
             }
             
+            # First pass: collect all corner projections to establish consistent bounds
+            all_corners_2d = []
+            for image_file in image_files:
+                # Find pose data for this image
+                pose_data = None
+                for img_id, img_data in images_data.items():
+                    if img_data.get('name') == image_file.name:
+                        pose_data = img_data.get('pose')
+                        break
+                
+                if pose_data:
+                    # Get image corners in 3D world coordinates by intersecting with painting plane
+                    corners_3d = camera_projector.get_image_corners_3d(pose_data, plane_projector)
+                    if len(corners_3d) == 4:
+                        # Project corners to 2D plane
+                        for corner_3d in corners_3d:
+                            corner_2d = plane_projector.world_to_plane_2d(corner_3d)
+                            all_corners_2d.append(corner_2d)
+            
+            if not all_corners_2d:
+                print(f"[ERROR] No valid corner projections found for {painting_name}")
+                continue
+            
+            # Calculate global bounds from all corners
+            all_corners_2d = np.array(all_corners_2d)
+            global_min_u, global_min_v = all_corners_2d.min(axis=0)
+            global_max_u, global_max_v = all_corners_2d.max(axis=0)
+            
+            print(f"Global bounds from all images: u=[{global_min_u:.3f}, {global_max_u:.3f}], v=[{global_min_v:.3f}, {global_max_v:.3f}]")
+            
+            # Load 3D reconstruction points for better bounds
+            reconstruction_points_3d = None
+            try:
+                reconstruction_path = self.output_dir / painting_name / 'global' / '0'
+                if reconstruction_path.exists():
+                    reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
+                    points3D = reconstruction.points3D
+                    
+                    if len(points3D) > 0:
+                        # Extract 3D point coordinates
+                        points3D_coords = []
+                        for point3D in points3D.values():
+                            points3D_coords.append(point3D.xyz)
+                        
+                        reconstruction_points_3d = points3D_coords
+                        print(f"Loaded {len(reconstruction_points_3d)} reconstruction points for better bounds")
+                    else:
+                        print("No 3D points found in reconstruction")
+                else:
+                    print(f"Reconstruction not found at {reconstruction_path}")
+            except Exception as e:
+                print(f"Failed to load reconstruction points: {e}")
+            
+            # Create global rectification grid using all corners and reconstruction points
+            grid_size = config.GRID_SIZE // 2  # Reduced resolution for performance
+            global_grid_points_3d, global_grid_bounds = create_rectification_grid(
+                plane_projector, 
+                [],  # We'll use reconstruction points instead of individual corners
+                grid_size, 
+                margin=config.RECTIFICATION_CONFIG['envelope_margin'],
+                reconstruction_points_3d=reconstruction_points_3d,
+                global_bounds=(global_min_u, global_max_u, global_min_v, global_max_v)
+            )
+            
+            print(f"Created global grid: {len(global_grid_points_3d)} points, bounds={global_grid_bounds}")
+            
+            # Second pass: rectify each image using the global grid
             for i, image_file in enumerate(image_files):
                 print(f"Processing image {i+1}/{len(image_files)}: {image_file.name}")
                 
@@ -308,18 +256,24 @@ class RectificationStep(StepBase):
                     print(f"No pose data found for {image_file.name}")
                     continue
                 
-                # Rectify image
-                rectified = self.rectify_image_to_plane(
-                    image_file, pose_data, K, plane_normal, plane_center, painting_name
+                # True orthorectification using global grid
+                result = self.rectify_image_true_ortho_global(
+                    image_file, pose_data, camera_projector, plane_projector, 
+                    global_grid_points_3d, grid_size, painting_name
                 )
                 
-                if rectified is not None:
+                if result is not None:
+                    rectified = result
                     rectified_images.append(rectified)
                     
                     # Save individual rectified image
                     output_path = self.rectified_dir / f"{painting_name}_{image_file.stem}_rectified.jpg"
                     cv2.imwrite(str(output_path), rectified)
                     print(f"Saved rectified image: {output_path.name}")
+                    
+                    # Store global grid bounds
+                    if rectification_info['grid_bounds'] is None:
+                        rectification_info['grid_bounds'] = global_grid_bounds
                     
                     # Add to rectification info
                     rectification_info['rectified_images'].append({
@@ -343,7 +297,7 @@ class RectificationStep(StepBase):
                 print(f"[WARNING] Created placeholder rectification data for {painting_name}")
                 continue
             
-            # Create overview
+            # Create overview using proper fusion
             overview = self.create_overview(rectified_images, painting_name)
             if overview is not None:
                 overview_path = self.rectified_dir / f"{painting_name}_overview.jpg"
@@ -358,7 +312,7 @@ class RectificationStep(StepBase):
             if config.INTERMEDIATE_RESULTS['save_rectification_data']:
                 self.save_result(f"rectification_data_{painting_name}", rectification_info)
             
-            print(f"[OK] Rectification completed for {painting_name}")
+            print(f"[OK] True orthorectification completed for {painting_name}")
         
         # Save combined results
         step_results = {
@@ -371,7 +325,7 @@ class RectificationStep(StepBase):
         self.save_result("step5_rectification_results", step_results)
         
         successful_rectifications = sum(1 for info in rectification_results.values() if info.get('status') != 'failed')
-        print(f"[OK] Step 5 completed. Rectification data for {len(rectification_results)} paintings ({successful_rectifications} successful).")
+        print(f"[OK] Step 5 completed. True orthorectification for {len(rectification_results)} paintings ({successful_rectifications} successful).")
         
         return step_results
 
@@ -381,4 +335,4 @@ if __name__ == "__main__":
     step = RectificationStep()
     results = step.run()
     if results:
-        print(f"Step 5 completed. Rectified images for {results['num_paintings']} paintings.") 
+        print(f"Step 5 completed. True orthorectified images for {results['num_paintings']} paintings.") 

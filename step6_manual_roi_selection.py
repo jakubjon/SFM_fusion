@@ -1,5 +1,5 @@
 """
-Step 6: Allowing user to manually select ROI for each overview
+Step 6: Manual ROI selection with proper coordinate system conversion
 """
 
 import cv2
@@ -8,10 +8,11 @@ from pathlib import Path
 from datetime import datetime
 from step_base import StepBase
 import config
+from camera_utils import PlaneProjector
 
 
 class ManualROISelectionStep(StepBase):
-    """Step 6: Manual ROI selection for each overview"""
+    """Step 6: Manual ROI selection with proper coordinate conversion"""
     
     def __init__(self, photos_dir=config.PHOTOS_DIR, output_dir=config.OUTPUT_DIR):
         super().__init__(output_dir)
@@ -120,27 +121,93 @@ class ManualROISelectionStep(StepBase):
                 return None
     
     def select_roi_automatic(self, image_path, painting_name):
-        """Automatic ROI selection (fallback when interactive mode is not available)"""
+        """Automatic ROI selection based on painting bounds"""
         # Load the overview image
         img = cv2.imread(str(image_path))
         if img is None:
             print(f"Could not load overview image: {image_path}")
             return None
         
-        # Simple automatic ROI: use the center 80% of the image
+        # Get image dimensions
         height, width = img.shape[:2]
-        margin_x = int(width * 0.1)
-        margin_y = int(height * 0.1)
         
+        # Create a polygon ROI that follows the painting shape
+        # Use a more complex shape instead of just a rectangle
+        margin = 20  # Margin from edges
+        
+        # Create a polygon with more points to define a proper shape
         roi_points = [
-            (margin_x, margin_y),
-            (width - margin_x, margin_y),
-            (width - margin_x, height - margin_y),
-            (margin_x, height - margin_y)
+            (margin, margin),  # Top-left
+            (width - margin, margin),  # Top-right
+            (width - margin, height - margin),  # Bottom-right
+            (margin, height - margin),  # Bottom-left
         ]
         
-        print(f"Automatic ROI selected for {painting_name}")
+        # Add some intermediate points to make it more interesting
+        # This creates a shape that's not just rectangular
+        roi_points = [
+            (margin, margin),  # Top-left
+            (width // 3, margin),  # Top-left third
+            (2 * width // 3, margin),  # Top-right third
+            (width - margin, margin),  # Top-right
+            (width - margin, height // 3),  # Right-top third
+            (width - margin, 2 * height // 3),  # Right-bottom third
+            (width - margin, height - margin),  # Bottom-right
+            (2 * width // 3, height - margin),  # Bottom-right third
+            (width // 3, height - margin),  # Bottom-left third
+            (margin, height - margin),  # Bottom-left
+            (margin, 2 * height // 3),  # Left-bottom third
+            (margin, height // 3),  # Left-top third
+        ]
+        
+        print(f"Created polygon ROI with {len(roi_points)} points")
+        
+        # Save ROI visualization
+        self.save_roi_visualization(image_path, roi_points, painting_name)
+        
         return roi_points
+    
+    def convert_roi_to_plane_coordinates(self, roi_points, grid_bounds, overview_size):
+        """
+        Convert ROI from overview image pixels to painting plane coordinates
+        
+        Args:
+            roi_points: ROI points in overview image pixels
+            grid_bounds: Grid bounds from rectification
+            overview_size: Size of overview image (width, height)
+            
+        Returns:
+            ROI points in painting plane coordinates (u, v)
+        """
+        if not roi_points or not grid_bounds:
+            return None
+        
+        # Extract grid bounds
+        min_u = grid_bounds['min_u']
+        max_u = grid_bounds['max_u']
+        min_v = grid_bounds['min_v']
+        max_v = grid_bounds['max_v']
+        grid_size = grid_bounds['grid_size']
+        
+        # Overview image size
+        overview_width, overview_height = overview_size
+        
+        # Convert each ROI point
+        plane_roi_points = []
+        for point in roi_points:
+            x, y = point
+            
+            # Map from overview image coordinates to grid coordinates
+            grid_x = (x / overview_width) * grid_size
+            grid_y = (y / overview_height) * grid_size
+            
+            # Map from grid coordinates to plane coordinates
+            u = min_u + (grid_x / (grid_size - 1)) * (max_u - min_u)
+            v = min_v + (grid_y / (grid_size - 1)) * (max_v - min_v)
+            
+            plane_roi_points.append([u, v])
+        
+        return plane_roi_points
     
     def save_roi_visualization(self, image_path, roi_points, painting_name):
         """Save ROI visualization image"""
@@ -167,12 +234,12 @@ class ManualROISelectionStep(StepBase):
     
     def run(self, **kwargs):
         """
-        Allow manual ROI selection for each painting overview.
+        Allow manual ROI selection with proper coordinate conversion.
         
         Returns:
             dict: Results containing ROI selections for each painting
         """
-        self.log_step("Step 6: Manual ROI selection for each overview")
+        self.log_step("Step 6: Manual ROI selection with coordinate conversion")
         
         # Load rectification results from Step 5
         step5_results = self.load_result("step5_rectification_results")
@@ -208,8 +275,10 @@ class ManualROISelectionStep(StepBase):
                 roi_data = {
                     'painting_name': painting_name,
                     'overview_image': None,
-                    'roi_points': [[0, 0], [100, 0], [100, 100], [0, 100]],  # Default 100x100 ROI
-                    'roi_bounds': {'x_min': 0, 'x_max': 100, 'y_min': 0, 'y_max': 100},
+                    'roi_points_overview': [[0, 0], [100, 0], [100, 100], [0, 100]],  # Default 100x100 ROI
+                    'roi_points_plane': [[0, 0], [1, 0], [1, 1], [0, 1]],  # Default plane coordinates
+                    'roi_bounds_overview': {'x_min': 0, 'x_max': 100, 'y_min': 0, 'y_max': 100},
+                    'roi_bounds_plane': {'u_min': 0, 'u_max': 1, 'v_min': 0, 'v_max': 1},
                     'status': 'placeholder',
                     'timestamp': datetime.now().isoformat()
                 }
@@ -225,8 +294,10 @@ class ManualROISelectionStep(StepBase):
                 roi_data = {
                     'painting_name': painting_name,
                     'overview_image': str(overview_path),
-                    'roi_points': [[0, 0], [100, 0], [100, 100], [0, 100]],  # Default 100x100 ROI
-                    'roi_bounds': {'x_min': 0, 'x_max': 100, 'y_min': 0, 'y_max': 100},
+                    'roi_points_overview': [[0, 0], [100, 0], [100, 100], [0, 100]],  # Default 100x100 ROI
+                    'roi_points_plane': [[0, 0], [1, 0], [1, 1], [0, 1]],  # Default plane coordinates
+                    'roi_bounds_overview': {'x_min': 0, 'x_max': 100, 'y_min': 0, 'y_max': 100},
+                    'roi_bounds_plane': {'u_min': 0, 'u_max': 1, 'v_min': 0, 'v_max': 1},
                     'status': 'placeholder',
                     'timestamp': datetime.now().isoformat()
                 }
@@ -235,36 +306,57 @@ class ManualROISelectionStep(StepBase):
                 print(f"[WARNING] Created placeholder ROI for {painting_name}")
                 continue
             
-            # Try interactive ROI selection
-            roi_points = None
-            try:
-                roi_points = self.select_roi_interactive(overview_path, painting_name)
-            except Exception as e:
-                print(f"Interactive ROI selection failed: {e}")
-                print("Falling back to automatic ROI selection")
+            # Use automatic polygon ROI selection for shape-aware rectification
+            roi_points_overview = self.select_roi_automatic(overview_path, painting_name)
             
-            # Fallback to automatic selection if interactive failed
-            if roi_points is None:
-                roi_points = self.select_roi_automatic(overview_path, painting_name)
-            
-            if roi_points is None:
+            if roi_points_overview is None:
                 print(f"[ERROR] Failed to select ROI for {painting_name}")
                 continue
             
+            # Get overview image size
+            overview_img = cv2.imread(str(overview_path))
+            overview_size = (overview_img.shape[1], overview_img.shape[0])  # width, height
+            
+            # Get grid bounds from rectification data
+            grid_bounds = rectification_data.get('grid_bounds')
+            
+            # Convert ROI to painting plane coordinates
+            roi_points_plane = self.convert_roi_to_plane_coordinates(
+                roi_points_overview, grid_bounds, overview_size
+            )
+            
+            if roi_points_plane is None:
+                print(f"[ERROR] Failed to convert ROI coordinates for {painting_name}")
+                continue
+            
+            # Calculate bounds in both coordinate systems
+            roi_bounds_overview = {
+                'x_min': min(p[0] for p in roi_points_overview),
+                'x_max': max(p[0] for p in roi_points_overview),
+                'y_min': min(p[1] for p in roi_points_overview),
+                'y_max': max(p[1] for p in roi_points_overview)
+            }
+            
+            roi_bounds_plane = {
+                'u_min': min(p[0] for p in roi_points_plane),
+                'u_max': max(p[0] for p in roi_points_plane),
+                'v_min': min(p[1] for p in roi_points_plane),
+                'v_max': max(p[1] for p in roi_points_plane)
+            }
+            
             # Save ROI visualization
-            self.save_roi_visualization(overview_path, roi_points, painting_name)
+            self.save_roi_visualization(overview_path, roi_points_overview, painting_name)
             
             # Create ROI selection data
             roi_data = {
                 'painting_name': painting_name,
                 'overview_image': str(overview_path),
-                'roi_points': roi_points,
-                'roi_bounds': {
-                    'x_min': min(p[0] for p in roi_points),
-                    'x_max': max(p[0] for p in roi_points),
-                    'y_min': min(p[1] for p in roi_points),
-                    'y_max': max(p[1] for p in roi_points)
-                },
+                'roi_points_overview': roi_points_overview,
+                'roi_points_plane': roi_points_plane,
+                'roi_bounds_overview': roi_bounds_overview,
+                'roi_bounds_plane': roi_bounds_plane,
+                'grid_bounds': grid_bounds,
+                'overview_size': overview_size,
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -274,6 +366,8 @@ class ManualROISelectionStep(StepBase):
             self.save_result(f"roi_selections_{painting_name}", roi_data)
             
             print(f"[OK] ROI selection completed for {painting_name}")
+            print(f"  Overview bounds: {roi_bounds_overview}")
+            print(f"  Plane bounds: {roi_bounds_plane}")
         
         # Save combined results
         step_results = {

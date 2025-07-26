@@ -48,6 +48,16 @@ The painting reconstruction pipeline has been refactored into a modular system w
 - **Outputs**: High resolution rectified images for each painting
 - **Dependencies**: Steps 3, 4, 6
 
+true ortorectification wrapup
+1) we are at the beggining of step 5 so wee know painting plane parameters, position and orientation of all cameras, global camera calibration
+2) 2D coordinate system of the plane is established
+3) picture normalization (removing distosion) sing global camera calibration 
+3) corners of the original pictures are reprojected in to the painting plane and represented as 4 2D points
+4) rectangular envelop is calculated in the paintong plane and only for this area the original picture is true ortorectified using position of the camera and position of the plane 
+5) overievw is created by fusing all images taken in acout relative shifts
+6) step5 manual ROI selection - which basicaly define otline of the painting in painting plane 
+7) step7 only for this area in panitng plane true ortorctified high resolution image is rendered
+
 ## Usage
 
 ### Run Complete Pipeline

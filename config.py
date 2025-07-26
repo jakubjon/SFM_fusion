@@ -50,9 +50,9 @@ PROCESSING_STEPS = {
     'global_calibration': False,      # Step 2: Global camera calibration adjustment (using selected distortion model radial by default)
     'recalculate_positions': False,   # Step 3: Recalculate camera positions of each individual painting batch with global calibration
     'point_cloud_generation': False,  # Step 4: Point cloud generation for each individual painting batch with global calibration
-    'rectification': False,           # Step 5: Image low resolution rectification of all individual pictures of each individual painting batches with global calibration and creating overviews for each batch
-    'manual_roi_selection': False,    # Step 6: Allowing user to manually select ROI for each overview
-    'high_res_rectification': True   # Step 7: Generate high resolution orthorectified images individual pictures for ROI
+    'rectification': True,           # Step 5: True orthorectification of all individual pictures using proper camera projection with global calibration and creating overviews for each batch
+    'manual_roi_selection': True,    # Step 6: Manual ROI selection with proper coordinate system conversion
+    'high_res_rectification': True   # Step 7: Generate high resolution orthorectified images for ROI using true orthorectification
 }
 
 # Execution control
@@ -73,9 +73,7 @@ INTERMEDIATE_RESULTS = {
 
 # Rectification configuration
 RECTIFICATION_CONFIG = {
-    'use_2d_coordinate_system': True,      # Use proper 2D coordinate system
-    'create_rectangular_envelope': True,   # Create rectangular envelope
-    'show_original_frames': True,          # Show original frame outlines
-    'reduced_resolution_factor': 0.5,      # Resolution reduction factor
-    'envelope_margin': 0.1                 # Margin around painting (10%)
+    'envelope_margin': 0.3,  # Increased margin to capture more of the painting
+    'grid_size': 512,        # Base grid size for rectification
+    'target_resolution': 512 # Target resolution for high-res output (reduced for testing)
 } 
