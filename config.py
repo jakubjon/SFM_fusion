@@ -13,8 +13,8 @@ PLANE_THRESHOLD = 0.1  # Distance threshold for plane inliers (meters)
 DEFAULT_CAMERA_PARAMS = {
     'width': 4032,  # Typical phone camera resolution
     'height': 3024,
-    'model': 'SIMPLE_PINHOLE',
-    'params': [2000, 2016, 1512]  # focal_length, cx, cy
+    'model': 'SIMPLE_RADIAL',  # More complex model for global calibration
+    'params': [2000, 2016, 1512, 0.0]  # focal_length, cx, cy, k1 (radial distortion)
 }
 
 # Image processing
@@ -43,3 +43,33 @@ SHARPENING_KERNEL = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
 SAVE_INTERMEDIATE = True  # Save individual rectified images
 SAVE_CALIBRATION = True   # Save camera calibration data
 VERBOSE = True            # Print detailed progress information 
+
+# Processing steps configuration
+PROCESSING_STEPS = {
+    'run_local_sfm': True,           # Step 1: Run local SfM for initial camera positions
+    'global_calibration': True,      # Step 2: Global bundle adjustment
+    'recalculate_positions': True,   # Step 3: Recalculate with global calibration
+    'point_cloud_generation': True,  # Step 4: Point cloud generation with global calibration
+    'rectification': True,           # Step 5: Image rectification with global calibration
+    'create_overviews': True,        # Step 6: Create painting overviews
+    'comprehensive_overview': True   # Step 7: Create comprehensive overview
+}
+
+# Intermediate results configuration
+INTERMEDIATE_RESULTS = {
+    'save_intermediate': True,              # Enable/disable all intermediate result saving
+    'save_local_reconstructions': True,    # Save local SfM reconstructions
+    'save_global_calibration': True,       # Save global calibration results
+    'save_point_clouds': True,             # Save point cloud data
+    'save_rectification_data': True,       # Save rectification parameters
+    'save_overview_data': True             # Save overview generation data
+}
+
+# Rectification configuration
+RECTIFICATION_CONFIG = {
+    'use_2d_coordinate_system': True,      # Use proper 2D coordinate system
+    'create_rectangular_envelope': True,   # Create rectangular envelope
+    'show_original_frames': True,          # Show original frame outlines
+    'reduced_resolution_factor': 0.5,      # Resolution reduction factor
+    'envelope_margin': 0.1                 # Margin around painting (10%)
+} 
