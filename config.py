@@ -5,7 +5,8 @@ PHOTOS_DIR = 'Photos'
 OUTPUT_DIR = 'outputs'
 
 # Processing parameters
-GRID_SIZE = 512  # Resolution of rectified images (reduced for performance)
+OVERVIEW_GRID_SIZE = 512  # Resolution of rectified images (reduced for performance)
+HIGH_RES_GRID_SIZE = 2048  # Resolution of rectified images (reduced for performance)
 RANSAC_ITERATIONS = 100  # Number of RANSAC iterations for plane fitting
 PLANE_THRESHOLD = 0.1  # Distance threshold for plane inliers (meters)
 
@@ -17,63 +18,13 @@ DEFAULT_CAMERA_PARAMS = {
     'params': [2000, 2016, 1512, 0.0]  # focal_length, cx, cy, k1 (radial distortion)
 }
 
-# Image processing
-BILATERAL_FILTER_PARAMS = {
-    'd': 15,  # Diameter of pixel neighborhood
-    'sigma_color': 75,  # Filter sigma in color space
-    'sigma_space': 75   # Filter sigma in coordinate space
-}
-
-# Optical flow parameters for image alignment
-OPTICAL_FLOW_PARAMS = {
-    'pyr_scale': 0.5,
-    'levels': 3,
-    'winsize': 15,
-    'iterations': 3,
-    'poly_n': 5,
-    'poly_sigma': 1.2,
-    'flags': 0
-}
-
-# Fusion parameters
-import numpy as np
-SHARPENING_KERNEL = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-
-# Output settings
-SAVE_INTERMEDIATE = True  # Save individual rectified images
-SAVE_CALIBRATION = True   # Save camera calibration data
-VERBOSE = True            # Print detailed progress information 
-
 # Processing steps configuration
 PROCESSING_STEPS = {
     'run_local_sfm': False,           # Step 1: Run local SfM for initial camera positions and using initial camera calibration
     'global_calibration': False,      # Step 2: Global camera calibration adjustment (using selected distortion model radial by default)
     'recalculate_positions': False,   # Step 3: Recalculate camera positions of each individual painting batch with global calibration
     'point_cloud_generation': False,  # Step 4: Point cloud generation for each individual painting batch with global calibration
-    'rectification': True,           # Step 5: True orthorectification of all individual pictures using proper camera projection with global calibration and creating overviews for each batch
+    'rectification': False,           # Step 5: True orthorectification of all individual pictures using proper camera projection with global calibration and creating overviews for each batch
     'manual_roi_selection': True,    # Step 6: Manual ROI selection with proper coordinate system conversion
     'high_res_rectification': True   # Step 7: Generate high resolution orthorectified images for ROI using true orthorectification
 }
-
-# Execution control
-EXECUTION_CONTROL = {
-    'overwrite_existing': True,      # Whether to overwrite existing intermediate results
-    'force_recalculation': True      # Whether to force recalculation even if data exists
-}
-
-# Intermediate results configuration
-INTERMEDIATE_RESULTS = {
-    'save_intermediate': True,              # Enable/disable all intermediate result saving
-    'save_local_reconstructions': True,    # Save local SfM reconstructions
-    'save_global_calibration': True,       # Save global calibration results
-    'save_point_clouds': True,             # Save point cloud data
-    'save_rectification_data': True,       # Save rectification parameters
-    'save_overview_data': True             # Save overview generation data
-}
-
-# Rectification configuration
-RECTIFICATION_CONFIG = {
-    'envelope_margin': 0.3,  # Increased margin to capture more of the painting
-    'grid_size': 512,        # Base grid size for rectification
-    'target_resolution': 512 # Target resolution for high-res output (reduced for testing)
-} 

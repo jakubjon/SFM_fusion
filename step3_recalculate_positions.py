@@ -172,12 +172,6 @@ class RecalculatePositionsStep(StepBase):
             print(f"Recalculating positions for painting {painting_name}")
             print(f"{'='*80}")
             
-            # Check if we already have global reconstruction
-            existing_result = self.load_result(f"global_reconstruction_{painting_name}")
-            if existing_result and config.INTERMEDIATE_RESULTS['save_intermediate'] and not self.should_overwrite_existing():
-                print(f"Found existing global reconstruction for {painting_name}")
-                global_reconstructions[painting_name] = existing_result
-                continue
             
             # Ensure output directory exists
             output_dir = self.output_dir / painting_name / 'global'

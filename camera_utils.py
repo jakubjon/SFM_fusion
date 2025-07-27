@@ -336,152 +336,83 @@ class PlaneProjector:
         return self.plane_center + point_2d[0] * self.v1 + point_2d[1] * self.v2
 
 
-def create_rectification_grid(plane_projector: PlaneProjector, 
-                            corners_3d: List[np.ndarray],
-                            grid_size: int,
-                            margin: float = 0.1,
-                            reconstruction_points_3d: Optional[List[np.ndarray]] = None,
-                            global_bounds: Optional[Tuple[float, float, float, float]] = None) -> Tuple[np.ndarray, dict]:
+def create_simple_envelope_grid(plane_projector: PlaneProjector, 
+                               all_corners_2d: List[np.ndarray],
+                               grid_size: int) -> Tuple[np.ndarray, dict]:
     """
-    Create a rectification grid on the painting plane that follows the actual painting shape
+    Create a simple rectangular grid based on the envelope of all image corner projections
     
     Args:
         plane_projector: Plane projector instance
-        corners_3d: 3D coordinates of image corners
-        grid_size: Size of the rectification grid
-        margin: Margin around the painting (fraction of painting size)
-        reconstruction_points_3d: Optional 3D points from COLMAP reconstruction for better bounds
-        global_bounds: Optional global bounds (min_u, max_u, min_v, max_v) from all images
+        all_corners_2d: List of 2D corner projections from all images
+        grid_size: Base size of the rectification grid (will be adjusted for aspect ratio)
+        margin: Margin around the envelope (fraction of envelope size) - only used if add_margin=True
+        add_margin: Whether to add margin around the envelope (default: False for tight fit)
         
     Returns:
         Tuple of (grid_points_3d, grid_bounds)
     """
-    # If global bounds are provided, use them directly
-    if global_bounds is not None:
-        min_u, max_u, min_v, max_v = global_bounds
-        print(f"Using provided global bounds: u=[{min_u:.3f}, {max_u:.3f}], v=[{min_v:.3f}, {max_v:.3f}]")
-    else:
-        # Project corners to 2D plane
-        corners_2d = []
-        for corner_3d in corners_3d:
-            corner_2d = plane_projector.world_to_plane_2d(corner_3d)
-            corners_2d.append(corner_2d)
-        
-        corners_2d = np.array(corners_2d)
-        print(f"Corner projections to plane: {corners_2d}")
-        
-        # Find bounds of corners
-        min_u, min_v = corners_2d.min(axis=0)
-        max_u, max_v = corners_2d.max(axis=0)
-        
-        # If we have reconstruction points, use them to get better bounds and shape
-        painting_shape_points = None
-        if reconstruction_points_3d is not None and len(reconstruction_points_3d) > 0:
-            print(f"Using {len(reconstruction_points_3d)} reconstruction points for better bounds and shape")
-            
-            # Project all reconstruction points to plane
-            points_2d = []
-            for point_3d in reconstruction_points_3d:
-                point_2d = plane_projector.world_to_plane_2d(point_3d)
-                points_2d.append(point_2d)
-            
-            points_2d = np.array(points_2d)
-            
-            # Find bounds of all points
-            all_min_u, all_min_v = points_2d.min(axis=0)
-            all_max_u, all_max_v = points_2d.max(axis=0)
-            
-            # Use the union of corner bounds and reconstruction point bounds
-            min_u = min(min_u, all_min_u)
-            max_u = max(max_u, all_max_u)
-            min_v = min(min_v, all_min_v)
-            max_v = max(max_v, all_max_v)
-            
-            # Store painting shape points for adaptive grid
-            painting_shape_points = points_2d
-            
-            print(f"Combined bounds from corners and reconstruction points: u=[{min_u:.3f}, {max_u:.3f}], v=[{min_v:.3f}, {max_v:.3f}]")
+    if len(all_corners_2d) == 0:
+        print("[ERROR] No corner projections provided")
+        return None, None
     
-    # Add margin
+    # Convert to numpy array
+    all_corners_2d = np.array(all_corners_2d)
+    
+    # Simple envelope: min/max of all corners
+    min_u, min_v = all_corners_2d.min(axis=0)
+    max_u, max_v = all_corners_2d.max(axis=0)
+    
+    print(f"Simple envelope from all corners: u=[{min_u:.3f}, {max_u:.3f}], v=[{min_v:.3f}, {max_v:.3f}]")
+    
+    
+    # Calculate aspect ratio and adjust grid size
     u_range = max_u - min_u
     v_range = max_v - min_v
-    min_u -= u_range * margin
-    max_u += u_range * margin
-    min_v -= v_range * margin
-    max_v += v_range * margin
+    aspect_ratio = u_range / v_range
     
-    print(f"Final grid bounds: u=[{min_u:.3f}, {max_u:.3f}], v=[{min_v:.3f}, {max_v:.3f}]")
+    if aspect_ratio > 1:
+        # Wider than tall - use grid_size for width
+        grid_width = grid_size
+        grid_height = int(grid_size / aspect_ratio)
+    else:
+        # Taller than wide - use grid_size for height
+        grid_height = grid_size
+        grid_width = int(grid_size * aspect_ratio)
     
-    # Create adaptive grid that follows painting shape
+    print(f"Aspect ratio: {aspect_ratio:.3f}, Grid size: {grid_width}x{grid_height}")
+    
+    # Create rectangular grid respecting aspect ratio
     grid_points_3d = []
-    valid_grid_points = 0
+    u_coords = np.linspace(min_u, max_u, grid_width)
+    v_coords = np.linspace(min_v, max_v, grid_height)
     
-    # If we have painting shape points, create a more efficient mask
-    painting_mask = None
-    if reconstruction_points_3d is not None and len(reconstruction_points_3d) > 10:
-        # Create a coarse mask first to speed up processing
-        mask_size = 100  # Coarse mask size
-        mask = np.zeros((mask_size, mask_size), dtype=bool)
-        
-        # Project reconstruction points to mask coordinates
-        for point_3d in reconstruction_points_3d:
-            point_2d = plane_projector.world_to_plane_2d(point_3d)
-            mask_i = int((point_2d[0] - min_u) / (max_u - min_u) * (mask_size - 1))
-            mask_j = int((point_2d[1] - min_v) / (max_v - min_v) * (mask_size - 1))
-            if 0 <= mask_i < mask_size and 0 <= mask_j < mask_size:
-                mask[mask_j, mask_i] = True
-        
-        # Dilate the mask to include nearby areas
-        from scipy.ndimage import binary_dilation
-        mask = binary_dilation(mask, iterations=2)
-        painting_mask = mask
-    
-    for i in range(grid_size):
-        for j in range(grid_size):
-            # Map grid coordinates to 2D plane coordinates
-            u = min_u + (i / (grid_size - 1)) * (max_u - min_u)
-            v = min_v + (j / (grid_size - 1)) * (max_v - min_v)
-            
-            # Check if this point is within the painting area using coarse mask
-            is_inside_painting = True
-            if painting_mask is not None:
-                # Map to mask coordinates
-                mask_i = int((u - min_u) / (max_u - min_u) * (mask_size - 1))
-                mask_j = int((v - min_v) / (max_v - min_v) * (mask_size - 1))
-                
-                if 0 <= mask_i < mask_size and 0 <= mask_j < mask_size:
-                    is_inside_painting = painting_mask[mask_j, mask_i]
-                else:
-                    is_inside_painting = False
-            
-            if is_inside_painting:
-                # Convert back to 3D
-                point_3d = plane_projector.plane_2d_to_world(np.array([u, v]))
-                grid_points_3d.append(point_3d)
-                valid_grid_points += 1
-            else:
-                # Add a point far away (will be filtered out during projection)
-                grid_points_3d.append(np.array([0, 0, -1000]))  # Far behind camera
-    
-    grid_points_3d = np.array(grid_points_3d)
-    
-    print(f"Created adaptive grid: {valid_grid_points}/{grid_size*grid_size} points within painting area")
+    for i, v in enumerate(v_coords):
+        for j, u in enumerate(u_coords):
+            point_3d = plane_projector.plane_2d_to_world(np.array([u, v]))
+            grid_points_3d.append(point_3d)
     
     grid_bounds = {
-        'min_u': min_u, 'max_u': max_u,
-        'min_v': min_v, 'max_v': max_v,
-        'grid_size': grid_size,
-        'valid_points': valid_grid_points
+        'min_u': min_u,
+        'max_u': max_u,
+        'min_v': min_v,
+        'max_v': max_v,
+        'grid_width': grid_width,
+        'grid_height': grid_height,
+        'aspect_ratio': aspect_ratio,
+        'valid_points': len(grid_points_3d)
     }
     
-    return grid_points_3d, grid_bounds
+    print(f"Created aspect-ratio-corrected grid: {len(grid_points_3d)} points ({grid_width}x{grid_height})")
+    return np.array(grid_points_3d), grid_bounds
 
 
 def rectify_image_true_ortho_global(image: np.ndarray, 
                                    camera_projector: CameraProjector,
                                    pose: dict,
                                    grid_points_3d: np.ndarray,
-                                   grid_size: int) -> np.ndarray:
+                                   grid_width: int,
+                                   grid_height: int) -> np.ndarray:
     """
     Perform true orthorectification using global grid (same grid for all images of painting)
     
@@ -490,7 +421,8 @@ def rectify_image_true_ortho_global(image: np.ndarray,
         camera_projector: Camera projector instance
         pose: Camera pose
         grid_points_3d: 3D grid points on painting plane (in world coordinates)
-        grid_size: Size of the rectification grid
+        grid_width: Width of the rectification grid
+        grid_height: Height of the rectification grid
         
     Returns:
         Rectified image
@@ -499,8 +431,8 @@ def rectify_image_true_ortho_global(image: np.ndarray,
     R = np.array(pose['rotation_matrix'])
     t = np.array(pose['translation'])
     
-    # Create rectified image
-    rectified = np.zeros((grid_size, grid_size, 3), dtype=np.uint8)
+    # Create rectified image with correct aspect ratio
+    rectified = np.zeros((grid_height, grid_width, 3), dtype=np.uint8)
     
     # Debug counters
     valid_projections = 0
@@ -545,8 +477,8 @@ def rectify_image_true_ortho_global(image: np.ndarray,
                 color = c0 * (1 - wy) + c1 * wy
                 
                 # Set pixel in rectified image
-                grid_i = i % grid_size
-                grid_j = i // grid_size
+                grid_i = i % grid_width
+                grid_j = i // grid_width
                 rectified[grid_j, grid_i] = color.astype(np.uint8)
                 valid_samples += 1
     
@@ -612,3 +544,4 @@ def create_overview_fusion(rectified_images: List[np.ndarray]) -> np.ndarray:
     overview = np.clip(overview, 0, 255).astype(np.uint8)
     
     return overview 
+

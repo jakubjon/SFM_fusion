@@ -26,44 +26,13 @@ The system is organized into 7 modular steps:
 6. **Manual ROI Selection**: Allowing user to manually select ROI for each overview
 7. **High Resolution Rectification**: Generate high resolution orthorectified images individual pictures for ROI
 
-## Directory Structure
+## Step Independence
 
-```
-SFM_fusion/
-├── Photos/
-│   ├── 1/          # Painting set 1
-│   │   ├── PXL_20250622_092601307.jpg
-│   │   ├── PXL_20250622_092604380.jpg
-│   │   └── ...
-│   ├── 2/          # Painting set 2
-│   ├── 3/          # Painting set 3
-│   └── 4/          # Painting set 4
-├── main.py          # Main orchestration script
-├── step_base.py     # Base class for all processing steps
-├── step1_local_sfm.py              # Step 1: Local SfM
-├── step2_global_calibration.py     # Step 2: Global calibration
-├── step3_recalculate_positions.py  # Step 3: Position recalculation
-├── step4_point_cloud_generation.py # Step 4: Point cloud generation
-├── step5_rectification.py          # Step 5: Low resolution rectification
-├── step6_manual_roi_selection.py  # Step 6: Manual ROI selection
-├── step7_high_res_rectification.py # Step 7: High resolution rectification
-├── config.py        # Configuration file
-├── requirements.txt # Python dependencies
-├── workflow.md      # Detailed workflow documentation
-└── README.md        # This file
-```
-
-## Installation
-
-1. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-2. Install COLMAP (required for pycolmap):
-   - **Windows**: Download from https://colmap.github.io/
-   - **Linux**: `sudo apt-get install colmap`
-   - **macOS**: `brew install colmap`
+Each step can run independently:
+- **Input Loading**: Steps load required inputs from intermediate directory
+- **Output Storage**: Steps save results to intermediate directory  
+- **Dependency Checking**: Steps verify required inputs before execution
+- **Resume Capability**: Steps can resume from existing intermediate results
 
 ## Usage
 
@@ -110,11 +79,6 @@ python main.py --step high_res_rectification
 python main.py --list-steps
 ```
 
-**Check step dependencies:**
-```bash
-python main.py --check-deps rectification
-```
-
 ### 4. Check results:
    - `outputs/intermediate/`: Intermediate results from each step
    - `outputs/rectified/`: Low resolution rectified images and overviews
@@ -141,26 +105,6 @@ python main.py --check-deps rectification
 ### ROI Selections
 - `{painting_name}_roi_visualization.jpg`: ROI visualization with selected regions
 
-## Step Independence
-
-Each step can run independently:
-- **Input Loading**: Steps load required inputs from intermediate directory
-- **Output Storage**: Steps save results to intermediate directory  
-- **Dependency Checking**: Steps verify required inputs before execution
-- **Resume Capability**: Steps can resume from existing intermediate results
-
-## Testing Individual Steps
-
-Each step can be tested independently:
-```bash
-python step1_local_sfm.py
-python step2_global_calibration.py
-python step3_recalculate_positions.py
-python step4_point_cloud_generation.py
-python step5_rectification.py
-python step6_manual_roi_selection.py
-python step7_high_res_rectification.py
-```
 
 ## Algorithm Overview
 
@@ -180,47 +124,6 @@ python step7_high_res_rectification.py
 4. **Stability**: Use a tripod or stable surface
 5. **Focus**: Ensure all images are in focus
 6. **Exposure**: Use consistent exposure settings
-
-## Troubleshooting
-
-### COLMAP fails to reconstruct
-- Check that images have sufficient overlap
-- Ensure images are not too blurry or underexposed
-- Try reducing image resolution if memory is limited
-
-### Poor rectification quality
-- Verify that the painting is roughly planar
-- Check that camera positions are well-distributed
-- Ensure sufficient 3D points are reconstructed
-
-### Steps fail due to missing inputs
-- Check that previous steps have completed successfully
-- Verify that intermediate results exist in `outputs/intermediate/`
-- Run steps in the correct order or use the complete pipeline
-
-## Advanced Usage
-
-### Custom Parameters
-Modify the configuration in `config.py` to adjust:
-- Grid resolution for rectification
-- RANSAC parameters for plane fitting
-- Filtering parameters for reflection removal
-- Fusion algorithms for super-resolution
-
-### Adding New Steps
-1. Create a new step module following the `StepBase` interface
-2. Implement the required methods: `run()`, `get_input_requirements()`, `get_output_files()`
-3. Add the step to the pipeline in `main.py`
-4. Update dependencies and configuration
-
-## Dependencies
-
-- **pycolmap**: COLMAP Python bindings for SfM
-- **opencv-python**: Computer vision operations
-- **numpy**: Numerical computations
-- **scipy**: Scientific computing
-- **scikit-learn**: Machine learning utilities
-- **matplotlib**: Visualization (optional)
 
 ## License
 

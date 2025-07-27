@@ -43,9 +43,6 @@ class StepBase(ABC):
         pass
     
     def save_result(self, step_name, data):
-        """Save step result to intermediate directory"""
-        if not config.INTERMEDIATE_RESULTS['save_intermediate']:
-            return
         
         # Convert data to serializable format
         serializable_data = self.to_serializable(data)
@@ -122,17 +119,3 @@ class StepBase(ABC):
         else:
             print(f"\n## {timestamp} - {step_name}")
         print("=" * 80) 
-
-    def should_skip_step(self, step_name):
-        """Check if a step should be skipped based on configuration"""
-        if not config.EXECUTION_CONTROL['force_recalculation']:
-            # Check if step result already exists
-            result_path = self.intermediate_dir / f"{step_name}.json"
-            if result_path.exists():
-                print(f"Found existing result for {step_name}, skipping...")
-                return True
-        return False
-    
-    def should_overwrite_existing(self):
-        """Check if existing data should be overwritten"""
-        return config.EXECUTION_CONTROL['overwrite_existing'] 

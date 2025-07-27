@@ -178,14 +178,6 @@ class LocalSfMStep(StepBase):
             print(f"Processing painting {painting_name}")
             print(f"{'='*80}")
             
-            # Check if we already have local reconstruction and calibration
-            existing_result = self.load_result(f"local_reconstruction_{painting_name}")
-            existing_calibration = self.load_result(f"local_calibration_{painting_name}")
-            if existing_result and existing_calibration and config.INTERMEDIATE_RESULTS['save_intermediate']:
-                print(f"Found existing local reconstruction for {painting_name}")
-                local_reconstructions[painting_name] = existing_result
-                local_calibrations[painting_name] = existing_calibration
-                continue
             
             # Ensure output directory exists
             output_dir = self.output_dir / painting_name
@@ -240,9 +232,9 @@ class LocalSfMStep(StepBase):
             local_reconstructions[painting_name] = reconstruction_summary
             
             # Save intermediate results
-            if config.INTERMEDIATE_RESULTS['save_local_reconstructions']:
-                self.save_result(f"local_reconstruction_{painting_name}", reconstruction_summary)
-                self.save_result(f"local_calibration_{painting_name}", local_calibration)
+
+            self.save_result(f"local_reconstruction_{painting_name}", reconstruction_summary)
+            self.save_result(f"local_calibration_{painting_name}", local_calibration)
             
             print(f"[OK] Local SfM completed for {painting_name}")
         

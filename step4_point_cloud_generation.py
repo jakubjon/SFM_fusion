@@ -196,12 +196,6 @@ class PointCloudGenerationStep(StepBase):
             print(f"Generating point cloud for painting {painting_name}")
             print(f"{'='*80}")
             
-            # Check if we already have point cloud data
-            existing_result = self.load_result(f"point_cloud_data_{painting_name}")
-            if existing_result and config.INTERMEDIATE_RESULTS['save_intermediate'] and not self.should_overwrite_existing():
-                print(f"Found existing point cloud data for {painting_name}")
-                point_cloud_data[painting_name] = existing_result
-                continue
             
             # Load the actual COLMAP reconstruction to get 3D points
             reconstruction_path = self.output_dir / painting_name / 'global' / '0'
@@ -247,8 +241,8 @@ class PointCloudGenerationStep(StepBase):
                 point_cloud_data[painting_name] = point_cloud_summary
                 
                 # Save intermediate results
-                if config.INTERMEDIATE_RESULTS['save_point_clouds']:
-                    self.save_result(f"point_cloud_data_{painting_name}", point_cloud_summary)
+
+                self.save_result(f"point_cloud_data_{painting_name}", point_cloud_summary)
                 
                 print(f"[OK] Point cloud data generated for {painting_name}")
                 

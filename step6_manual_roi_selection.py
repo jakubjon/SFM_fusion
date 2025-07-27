@@ -3,12 +3,10 @@ Step 6: Manual ROI selection with proper coordinate system conversion
 """
 
 import cv2
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 from step_base import StepBase
 import config
-from camera_utils import PlaneProjector
 
 
 class ManualROISelectionStep(StepBase):
@@ -120,66 +118,103 @@ class ManualROISelectionStep(StepBase):
                 cv2.destroyWindow(window_name)
                 return None
     
-    def select_roi_automatic(self, image_path, painting_name):
-        """Automatic ROI selection based on painting bounds"""
+    def select_roi_manual(self, image_path, painting_name):
+        """Manual ROI selection by clicking on 4 corners of the ROI rectangle"""
         # Load the overview image
         img = cv2.imread(str(image_path))
         if img is None:
             print(f"Could not load overview image: {image_path}")
             return None
         
-        # Get image dimensions
-        height, width = img.shape[:2]
+        # Create window and set mouse callback
+        window_name = f"Manual ROI Selection - {painting_name}"
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(window_name, self.mouse_callback_manual)
         
-        # Create a polygon ROI that follows the painting shape
-        # Use a more complex shape instead of just a rectangle
-        margin = 20  # Margin from edges
+        # Reset variables for manual selection
+        self.manual_roi_points = []
+        self.current_point = 0
+        self.corner_names = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
         
-        # Create a polygon with more points to define a proper shape
-        roi_points = [
-            (margin, margin),  # Top-left
-            (width - margin, margin),  # Top-right
-            (width - margin, height - margin),  # Bottom-right
-            (margin, height - margin),  # Bottom-left
-        ]
+        print(f"\nManual ROI Selection for {painting_name}")
+        print("Instructions:")
+        print("1. Click on the 4 corners of the ROI rectangle in this order:")
+        print("   - Top-Left corner")
+        print("   - Top-Right corner") 
+        print("   - Bottom-Right corner")
+        print("   - Bottom-Left corner")
+        print("2. Press 'r' to reset selection")
+        print("3. Press 'q' to quit without saving")
+        print("4. Press 'ESC' to skip this painting")
+        print(f"\nPlease click on the {self.corner_names[self.current_point]} corner...")
         
-        # Add some intermediate points to make it more interesting
-        # This creates a shape that's not just rectangular
-        roi_points = [
-            (margin, margin),  # Top-left
-            (width // 3, margin),  # Top-left third
-            (2 * width // 3, margin),  # Top-right third
-            (width - margin, margin),  # Top-right
-            (width - margin, height // 3),  # Right-top third
-            (width - margin, 2 * height // 3),  # Right-bottom third
-            (width - margin, height - margin),  # Bottom-right
-            (2 * width // 3, height - margin),  # Bottom-right third
-            (width // 3, height - margin),  # Bottom-left third
-            (margin, height - margin),  # Bottom-left
-            (margin, 2 * height // 3),  # Left-bottom third
-            (margin, height // 3),  # Left-top third
-        ]
-        
-        print(f"Created polygon ROI with {len(roi_points)} points")
-        
-        # Save ROI visualization
-        self.save_roi_visualization(image_path, roi_points, painting_name)
-        
-        return roi_points
+        while True:
+            # Create a copy of the image for drawing
+            display_img = img.copy()
+            
+            # Draw existing points
+            for i, point in enumerate(self.manual_roi_points):
+                cv2.circle(display_img, point, 5, (0, 255, 0), -1)
+                cv2.putText(display_img, f"{i+1}", (point[0]+10, point[1]-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                if i > 0:
+                    cv2.line(display_img, self.manual_roi_points[i-1], point, (0, 255, 0), 2)
+            
+            # Draw connection from last point to first point to close the rectangle
+            if len(self.manual_roi_points) == 3:
+                cv2.line(display_img, self.manual_roi_points[2], self.manual_roi_points[0], (0, 255, 0), 2)
+            
+            # Show current corner to click
+            if self.current_point < 4:
+                cv2.putText(display_img, f"Click: {self.corner_names[self.current_point]}", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            cv2.imshow(window_name, display_img)
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('r'):  # Reset
+                self.manual_roi_points = []
+                self.current_point = 0
+                print("Selection reset")
+                print(f"Please click on the {self.corner_names[self.current_point]} corner...")
+            elif key == ord('q') or key == 27:  # Quit or ESC
+                cv2.destroyWindow(window_name)
+                return None
+            
+            # Check if we have all 4 points
+            if len(self.manual_roi_points) == 4:
+                print("All 4 corners selected! Press 's' to save or 'r' to reset.")
+                if key == ord('s'):  # Save
+                    cv2.destroyWindow(window_name)
+                    return self.manual_roi_points
+    
+    def mouse_callback_manual(self, event, x, y, flags, param):
+        """Mouse callback for manual ROI corner selection"""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if self.current_point < 4:
+                self.manual_roi_points.append((x, y))
+                print(f"Selected {self.corner_names[self.current_point]} corner at ({x}, {y})")
+                self.current_point += 1
+                
+                if self.current_point < 4:
+                    print(f"Please click on the {self.corner_names[self.current_point]} corner...")
+                else:
+                    print("All 4 corners selected! Press 's' to save or 'r' to reset.")
     
     def convert_roi_to_plane_coordinates(self, roi_points, grid_bounds, overview_size):
         """
-        Convert ROI from overview image pixels to painting plane coordinates
+        Convert ROI points from overview image coordinates to painting plane coordinates
         
         Args:
-            roi_points: ROI points in overview image pixels
-            grid_bounds: Grid bounds from rectification
-            overview_size: Size of overview image (width, height)
+            roi_points: List of [x, y] points in overview image coordinates
+            grid_bounds: Grid bounds from Step 5 rectification
+            overview_size: [width, height] of overview image
             
         Returns:
-            ROI points in painting plane coordinates (u, v)
+            List of [u, v] points in painting plane coordinates
         """
-        if not roi_points or not grid_bounds:
+        if not grid_bounds:
+            print("[ERROR] No grid bounds available for coordinate conversion")
             return None
         
         # Extract grid bounds
@@ -187,25 +222,30 @@ class ManualROISelectionStep(StepBase):
         max_u = grid_bounds['max_u']
         min_v = grid_bounds['min_v']
         max_v = grid_bounds['max_v']
-        grid_size = grid_bounds['grid_size']
         
         # Overview image size
         overview_width, overview_height = overview_size
         
+        print(f"Converting ROI coordinates:")
+        print(f"  Overview size: {overview_width}x{overview_height}")
+        print(f"  Grid bounds: u=[{min_u:.3f}, {max_u:.3f}], v=[{min_v:.3f}, {max_v:.3f}]")
+        
         # Convert each ROI point
         plane_roi_points = []
-        for point in roi_points:
+        for i, point in enumerate(roi_points):
             x, y = point
             
-            # Map from overview image coordinates to grid coordinates
-            grid_x = (x / overview_width) * grid_size
-            grid_y = (y / overview_height) * grid_size
+            # Map from overview image coordinates to normalized coordinates (0-1)
+            norm_x = x / overview_width
+            norm_y = y / overview_height
             
-            # Map from grid coordinates to plane coordinates
-            u = min_u + (grid_x / (grid_size - 1)) * (max_u - min_u)
-            v = min_v + (grid_y / (grid_size - 1)) * (max_v - min_v)
+            # Map from normalized coordinates to plane coordinates
+            u = min_u + norm_x * (max_u - min_u)
+            v = min_v + norm_y * (max_v - min_v)
             
             plane_roi_points.append([u, v])
+            
+            print(f"  Point {i}: overview({x},{y}) -> plane({u:.3f},{v:.3f})")
         
         return plane_roi_points
     
@@ -260,12 +300,6 @@ class ManualROISelectionStep(StepBase):
             print(f"ROI Selection for painting {painting_name}")
             print(f"{'='*80}")
             
-            # Check if we already have ROI selection
-            existing_result = self.load_result(f"roi_selections_{painting_name}")
-            if existing_result and config.INTERMEDIATE_RESULTS['save_intermediate'] and not self.should_overwrite_existing():
-                print(f"Found existing ROI selection for {painting_name}")
-                roi_selections[painting_name] = existing_result
-                continue
             
             # Get overview image path
             overview_image = rectification_data.get('overview_image')
@@ -306,8 +340,8 @@ class ManualROISelectionStep(StepBase):
                 print(f"[WARNING] Created placeholder ROI for {painting_name}")
                 continue
             
-            # Use automatic polygon ROI selection for shape-aware rectification
-            roi_points_overview = self.select_roi_automatic(overview_path, painting_name)
+            # Use manual ROI selection for user-defined rectification
+            roi_points_overview = self.select_roi_manual(overview_path, painting_name)
             
             if roi_points_overview is None:
                 print(f"[ERROR] Failed to select ROI for {painting_name}")

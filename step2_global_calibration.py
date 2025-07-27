@@ -150,8 +150,8 @@ class GlobalCalibrationStep(StepBase):
             'timestamp': datetime.now().isoformat()
         }
         
-        if config.INTERMEDIATE_RESULTS['save_global_calibration']:
-            self.save_result("global_calibration", calibration_data)
+
+        self.save_result("global_calibration", calibration_data)
         
         # Save step results
         step_results = {
